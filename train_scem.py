@@ -4,7 +4,7 @@ import math
 import os
 import random
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from torch.nn import functional as F
@@ -21,6 +21,8 @@ def parse_args():
     parser.add_argument("--output-dir", default="./checkpoints/scem")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--min-prefix-length", type=int, default=16)
+    parser.add_argument("--region-points-per-example", type=int, default=8)
+    parser.add_argument("--random-points-per-example", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum-steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=1)
@@ -43,34 +45,89 @@ def parse_args():
     return parser.parse_args()
 
 
-class PrefixNextTokenDataset(Dataset):
-    """Sample one next-token training step from each CUDA example."""
+REGION_ANCHORS = {
+    "signature": ("__global__", "__device__", "__host__"),
+    "indexing": ("threadIdx.", "blockIdx.", "blockDim.", "int idx", "int tid", "int row", "int col"),
+    "guard": ("if (", "if(", "&&", "||"),
+    "shared_memory": ("extern __shared__", "__shared__"),
+    "synchronization": ("__syncthreads",),
+    "write_back": ("] =", "]=", "atomicAdd", "atomicMax", "atomicMin"),
+    "statement_close": (";", "}"),
+}
 
-    def __init__(self, path: str, tokenizer, max_length: int, min_prefix_length: int):
+
+@dataclass(frozen=True)
+class TrainingPoint:
+    ids: List[int]
+    target_pos: int
+    source: str
+
+
+class PrefixNextTokenDataset(Dataset):
+    """Expand each CUDA example into multiple region-aware next-token steps."""
+
+    def __init__(
+        self,
+        path: str,
+        tokenizer,
+        max_length: int,
+        min_prefix_length: int,
+        region_points_per_example: int,
+        random_points_per_example: int,
+    ):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.min_prefix_length = min_prefix_length
+        self.region_points_per_example = region_points_per_example
+        self.random_points_per_example = random_points_per_example
         self.examples = []
+        raw_examples = 0
         with open(path, "r", encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if not line:
                     continue
                 record = json.loads(line)
-                text = self._record_to_text(record)
-                ids = tokenizer(text, add_special_tokens=False).input_ids[:max_length]
+                text, target_char_start = self._record_to_text(record)
+                raw_examples += 1
+                encoded = tokenizer(
+                    text,
+                    add_special_tokens=False,
+                    return_offsets_mapping=True,
+                    truncation=True,
+                    max_length=max_length,
+                )
+                ids = encoded.input_ids
                 if len(ids) > min_prefix_length:
-                    self.examples.append(ids)
+                    offsets = encoded.offset_mapping
+                    self.examples.extend(
+                        self._build_training_points(
+                            text=text,
+                            ids=ids,
+                            offsets=offsets,
+                            target_char_start=target_char_start,
+                        )
+                    )
         if not self.examples:
             raise ValueError("No usable training examples found")
+        print(f"Loaded {len(self.examples)} training points from {raw_examples} raw examples")
 
-    def _record_to_text(self, record: Dict[str, Any]) -> str:
+    def _record_to_text(self, record: Dict[str, Any]) -> Tuple[str, int]:
         if "messages" in record:
-            return self.tokenizer.apply_chat_template(
+            text = self.tokenizer.apply_chat_template(
                 record["messages"],
                 tokenize=False,
                 add_generation_prompt=False,
             )
+            assistant_contents = [
+                message.get("content", "")
+                for message in record["messages"]
+                if message.get("role") == "assistant"
+            ]
+            if not assistant_contents:
+                return text, 0
+            target_start = text.rfind(assistant_contents[-1])
+            return text, max(0, target_start)
         if "prompt" in record and "completion" in record:
             messages = [{"role": "user", "content": record["prompt"]}]
             prompt = self.tokenizer.apply_chat_template(
@@ -78,21 +135,82 @@ class PrefixNextTokenDataset(Dataset):
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            return prompt + record["completion"]
+            return prompt + record["completion"], len(prompt)
         if "text" in record:
-            return record["text"]
+            return record["text"], 0
         raise ValueError("Each JSONL row must contain text, prompt/completion, or messages")
 
     def __len__(self):
         return len(self.examples)
 
     def __getitem__(self, index):
-        ids = self.examples[index]
-        target_pos = random.randint(self.min_prefix_length, len(ids) - 1)
+        point = self.examples[index]
         return {
-            "prefix_ids": ids[:target_pos],
-            "label": ids[target_pos],
+            "prefix_ids": point.ids[: point.target_pos],
+            "label": point.ids[point.target_pos],
+            "source": point.source,
         }
+
+    def _build_training_points(
+        self,
+        text: str,
+        ids: List[int],
+        offsets: Sequence[Tuple[int, int]],
+        target_char_start: int,
+    ) -> List[TrainingPoint]:
+        positions = []
+        seen = set()
+        min_target_pos = self._char_to_token_pos(target_char_start, offsets) or self.min_prefix_length
+        min_target_pos = max(self.min_prefix_length, min_target_pos)
+        if min_target_pos >= len(ids):
+            return []
+        for region, anchors in REGION_ANCHORS.items():
+            for anchor in anchors:
+                char_pos = text.find(anchor, target_char_start)
+                if char_pos < 0:
+                    continue
+                token_pos = self._char_to_token_pos(char_pos, offsets)
+                if self._is_valid_target(token_pos, ids, min_target_pos) and token_pos not in seen:
+                    positions.append((token_pos, region))
+                    seen.add(token_pos)
+                break
+
+        positions = positions[: self.region_points_per_example]
+
+        random_budget = self.random_points_per_example
+        if random_budget > 0:
+            valid_range = range(min_target_pos, len(ids))
+            random_positions = random.sample(
+                list(valid_range),
+                k=min(random_budget, max(0, len(ids) - min_target_pos)),
+            )
+            for token_pos in random_positions:
+                if token_pos not in seen:
+                    positions.append((token_pos, "random"))
+                    seen.add(token_pos)
+
+        if not positions:
+            fallback = random.randint(min_target_pos, len(ids) - 1)
+            positions.append((fallback, "fallback"))
+
+        return [TrainingPoint(ids=ids, target_pos=token_pos, source=source) for token_pos, source in positions]
+
+    def _char_to_token_pos(
+        self,
+        char_pos: int,
+        offsets: Sequence[Tuple[int, int]],
+    ) -> Optional[int]:
+        for index, (start, end) in enumerate(offsets):
+            if start == end:
+                continue
+            if start <= char_pos < end or char_pos < end:
+                return index
+        return None
+
+    def _is_valid_target(self, token_pos: Optional[int], ids: List[int], min_target_pos: int) -> bool:
+        if token_pos is None:
+            return False
+        return min_target_pos <= token_pos < len(ids)
 
 
 @dataclass
@@ -196,6 +314,8 @@ def main():
         tokenizer=tokenizer,
         max_length=args.max_length,
         min_prefix_length=args.min_prefix_length,
+        region_points_per_example=args.region_points_per_example,
+        random_points_per_example=args.random_points_per_example,
     )
     dataloader = DataLoader(
         dataset,
@@ -210,7 +330,7 @@ def main():
     total_steps = math.ceil(len(dataloader) * args.epochs / args.grad_accum_steps)
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-    scaler = torch.cuda.amp.GradScaler(enabled=device == "cuda" and dtype == torch.float16)
+    scaler = torch.amp.GradScaler("cuda", enabled=device == "cuda" and dtype == torch.float16)
     extractor = CudaProgramStateExtractor(task_family=args.task_family, tensor_rank=args.tensor_rank)
 
     os.makedirs(args.output_dir, exist_ok=True)
