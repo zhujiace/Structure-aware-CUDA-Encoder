@@ -82,35 +82,51 @@ class PrefixNextTokenDataset(Dataset):
         self.random_points_per_example = random_points_per_example
         self.examples = []
         raw_examples = 0
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                record = json.loads(line)
-                text, target_char_start = self._record_to_text(record)
-                raw_examples += 1
-                encoded = tokenizer(
-                    text,
-                    add_special_tokens=False,
-                    return_offsets_mapping=True,
-                    truncation=True,
-                    max_length=max_length,
-                )
-                ids = encoded.input_ids
-                if len(ids) > min_prefix_length:
-                    offsets = encoded.offset_mapping
-                    self.examples.extend(
-                        self._build_training_points(
-                            text=text,
-                            ids=ids,
-                            offsets=offsets,
-                            target_char_start=target_char_start,
-                        )
+        for record in self._iter_records(path):
+            text, target_char_start = self._record_to_text(record)
+            raw_examples += 1
+            encoded = tokenizer(
+                text,
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+                truncation=True,
+                max_length=max_length,
+            )
+            ids = encoded.input_ids
+            if len(ids) > min_prefix_length:
+                offsets = encoded.offset_mapping
+                self.examples.extend(
+                    self._build_training_points(
+                        text=text,
+                        ids=ids,
+                        offsets=offsets,
+                        target_char_start=target_char_start,
                     )
+                )
         if not self.examples:
             raise ValueError("No usable training examples found")
         print(f"Loaded {len(self.examples)} training points from {raw_examples} raw examples")
+
+    def _iter_records(self, path: str):
+        if path.endswith(".json"):
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, list):
+                yield from data
+                return
+            if isinstance(data, dict):
+                if "data" in data and isinstance(data["data"], list):
+                    yield from data["data"]
+                    return
+                yield data
+                return
+            raise ValueError("JSON training file must contain an object or a list of objects")
+
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
 
     def _record_to_text(self, record: Dict[str, Any]) -> Tuple[str, int]:
         if "messages" in record:
@@ -136,9 +152,22 @@ class PrefixNextTokenDataset(Dataset):
                 add_generation_prompt=True,
             )
             return prompt + record["completion"], len(prompt)
+        if "instruction" in record and "output" in record:
+            user_content = record["instruction"]
+            if record.get("input"):
+                user_content = user_content.rstrip() + "\n\n" + record["input"].lstrip()
+            messages = [{"role": "user", "content": user_content}]
+            prompt = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            return prompt + record["output"], len(prompt)
         if "text" in record:
             return record["text"], 0
-        raise ValueError("Each JSONL row must contain text, prompt/completion, or messages")
+        raise ValueError(
+            "Each record must contain text, prompt/completion, messages, or instruction/output"
+        )
 
     def __len__(self):
         return len(self.examples)
