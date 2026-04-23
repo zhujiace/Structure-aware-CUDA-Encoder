@@ -299,19 +299,24 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
         for record_index, record in enumerate(records, start=1):
             task_id = int(record["id"])
             task = tasks_by_id.get(task_id)
-            output = {
-                "id": task_id,
-                "task_name": record.get("task_name", "Unknown"),
-            }
+            task_name = record.get("task_name", "Unknown")
+            sample_results = {}
             task_has_compile = False
             task_has_function = False
 
             if task is None:
-                output["error"] = "missing dataset task"
+                output = {
+                    "id": task_id,
+                    "task_name": task_name,
+                    "compile_pass": False,
+                    "functionality_pass": False,
+                    "error": "missing dataset task",
+                    "prompt": record.get("prompt", ""),
+                }
                 handle.write(json.dumps(output, ensure_ascii=False) + "\n")
                 continue
 
-            print(f"[EVAL {record_index}/{len(records)}] id={task_id} {output['task_name']}")
+            print(f"[EVAL {record_index}/{len(records)}] id={task_id} {task_name}")
             for sample_idx, code in iter_code_versions(record, args.num_samples):
                 total_versions += 1
                 compile_ok = False
@@ -333,8 +338,8 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
                                 timeout=args.run_timeout,
                             )
 
-                output[f"compile{sample_idx}"] = compile_ok
-                output[f"functionality{sample_idx}"] = functionality
+                sample_results[f"compile{sample_idx}"] = compile_ok
+                sample_results[f"functionality{sample_idx}"] = functionality
                 if compile_ok:
                     compile_ok_versions += 1
                     task_has_compile = True
@@ -345,8 +350,22 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
                 if not args.keep_temp:
                     shutil.rmtree(work_dir, ignore_errors=True)
 
-            output["compile_pass"] = task_has_compile
-            output["functionality_pass"] = task_has_function
+            output = {
+                "id": task_id,
+                "task_name": task_name,
+                "compile_pass": task_has_compile,
+                "functionality_pass": task_has_function,
+                **sample_results,
+                "prompt": record.get("prompt", ""),
+            }
+            for sample_idx in range(1, args.num_samples + 1):
+                response_key = f"response{sample_idx}"
+                code_key = f"code{sample_idx}"
+                if code_key in record:
+                    output[code_key] = record.get(code_key)
+                if response_key in record:
+                    output[response_key] = record.get(response_key)
+
             if task_has_compile:
                 task_compile_pass += 1
             if task_has_function:

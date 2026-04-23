@@ -237,6 +237,8 @@ summary.json              aggregate metrics
 temp_eval/                temporary compile/run directories, only kept with --keep-temp
 ```
 
+In `eval_results.jsonl`, compile and functionality fields are written before long fields such as `prompt`, `code*`, and `response*` so results remain easy to inspect in IDEs.
+
 `summary.json` reports both version-level and task-level metrics:
 
 - `compile_accuracy`: compiled samples / total samples

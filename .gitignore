@@ -4,3 +4,5 @@ data/
 __pycache__/
 *.py[cod]
 archive/
+checkpoints/
+eval_outputs/
