@@ -3,3 +3,4 @@ data/
 .codex
 __pycache__/
 *.py[cod]
+archive/
