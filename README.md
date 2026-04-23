@@ -165,6 +165,103 @@ Qwen3.5 generation defaults in the script:
 
 The local Hugging Face path does not implement an extra custom `presence_penalty`.
 
+## CUDABench Evaluation
+
+`eval_scem_cudabench.py` generates CUDA programs for `external/CUDABench/Datasets/CUDABench-Set.jsonl` and evaluates only:
+
+- compile accuracy
+- functionality accuracy
+
+It intentionally skips efficiency/NCU metrics.
+
+The script uses the CUDABench git submodule under `external/CUDABench`. After cloning this repository, initialize it with:
+
+```bash
+git submodule update --init --recursive
+```
+
+The script reuses the CUDABench prompt format and the same functional validation sequence:
+
+```text
+nvcc generated kernel.cu
+run dataset gen.py
+run compiled kernel
+run dataset compare.py
+```
+
+If `compare.py` prints `F`, functionality is counted as failed.
+
+### Baseline Evaluation
+
+By default, no SCEM checkpoint is loaded. This evaluates the plain Qwen3.5-0.8B backbone and is the first baseline:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+  --model-path ./models/Qwen3.5-0.8B \
+  --output-dir ./eval_outputs/qwen35_baseline \
+  --level level3_prompt \
+  --num-samples 1
+```
+
+For a quick smoke test:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+  --output-dir /tmp/scem_cudabench_smoke \
+  --limit 1 \
+  --max-new-tokens 4
+```
+
+### SCEM Evaluation
+
+After training, pass a SCEM checkpoint:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+  --model-path ./models/Qwen3.5-0.8B \
+  --scem-checkpoint ./checkpoints/scem_qwen35/step-1000/scem.pt \
+  --output-dir ./eval_outputs/scem_qwen35_step1000 \
+  --level level3_prompt \
+  --num-samples 1 \
+  --alpha 0.3
+```
+
+### Evaluation Outputs
+
+The output directory contains:
+
+```text
+generated_results.jsonl   raw model responses and extracted code
+eval_results.jsonl        per-task compile/functionality booleans
+summary.json              aggregate metrics
+temp_eval/                temporary compile/run directories, only kept with --keep-temp
+```
+
+`summary.json` reports both version-level and task-level metrics:
+
+- `compile_accuracy`: compiled samples / total samples
+- `functionality_accuracy`: functional samples / total samples
+- `task_compile_pass_rate`: tasks with at least one compiling sample / total tasks
+- `task_functionality_pass_rate`: tasks with at least one functional sample / total tasks
+
+### Re-evaluating Existing Generations
+
+To skip generation and only rerun compile/functionality validation:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+  --trust-generated \
+  --results-jsonl ./eval_outputs/qwen35_baseline/generated_results.jsonl \
+  --output-dir ./eval_outputs/qwen35_baseline_recheck \
+  --num-samples 1
+```
+
+If CUDABench is stored somewhere else, pass:
+
+```bash
+--cudabench-root /path/to/CUDABench
+```
+
 ## Training
 
 Training is supervised next-token fine-tuning over the adjusted logits:

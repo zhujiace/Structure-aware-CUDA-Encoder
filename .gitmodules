@@ -1,0 +1,3 @@
+[submodule "external/CUDABench"]
+	path = external/CUDABench
+	url = https://github.com/CUDA-Bench/CUDABench.git
