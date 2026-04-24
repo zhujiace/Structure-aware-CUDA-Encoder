@@ -30,9 +30,12 @@ scem/
   decoding.py           Hugging Face LogitsProcessor for decoding-time bias
   qwen_integration.py   Qwen/HF causal-LM integration helpers
 
-generate_qwen_scem.py   Qwen3.5 chat-style generation with SCEM
-train_scem.py           Region-aware multi-point SFT for SCEM
-test_scem.py            Shape smoke test for SCEM
+scripts/
+  demo.py               Interactive CUDABench generation/debug script
+  eval.py               CUDABench compile/functionality evaluation
+  train.py              Region-aware multi-point SFT for SCEM
+  smoke_test.py         Shape smoke test for SCEM
+  utils.py              Shared script utilities for CUDABench and generation
 data/train.json         Current CUDA SFT-style training data
 ```
 
@@ -136,21 +139,55 @@ This is intentionally cheap enough to run during decoding. It should eventually 
 
 ## Generation
 
-Default generation uses Qwen3.5-0.8B in chat-template mode:
+`scripts/demo.py` is a lightweight interactive test script for CUDABench tasks. It:
+
+- loads one or more tasks from `external/CUDABench/Datasets/CUDABench-Set.jsonl`
+- builds the CUDABench prompt
+- prints the full model response
+- prints the extracted CUDA code block
+- optionally runs compile and functionality checks
+- optionally enables SCEM during generation
+
+Example: inspect one task without SCEM:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python generate_qwen_scem.py \
-  --prompt "Write a CUDA kernel for vector addition." \
-  --max-new-tokens 512 \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py \
+  --task-id 0 \
+  --level level3_prompt \
+  --max-new-tokens 512
+```
+
+Example: inspect several tasks and run compile/functionality checks:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py \
+  --task-ids 0,1,2 \
+  --check-compile \
+  --check-functionality
+```
+
+Example: enable SCEM with a checkpoint:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py \
+  --task-id 0 \
+  --enable-scem \
+  --scem-checkpoint ./checkpoints/scem_qwen35/step-1000/scem.pt \
   --alpha 0.3
 ```
 
-Available arguments:
+Important arguments:
 
-- `--model-path`: local model path. Default: `./models/Qwen3.5-0.8B`.
-- `--prompt`: user prompt.
-- `--max-new-tokens`: maximum generated tokens.
-- `--alpha`: SCEM bias strength during decoding.
+- `--task-id`: single CUDABench task id.
+- `--task-ids`: comma-separated task ids.
+- `--start-id`, `--end-id`: id range selection.
+- `--limit`: evaluate the first N tasks if no explicit ids are given.
+- `--check-compile`: run `nvcc` on the extracted CUDA code.
+- `--check-functionality`: run `gen.py -> kernel -> compare.py`.
+- `--enable-scem`: enable SCEM during generation.
+- `--scem-checkpoint`: trained `scem.pt` path. If omitted while `--enable-scem` is set, the script uses an untrained zero-effect SCEM module.
+- `--alpha`: SCEM bias strength.
+- `--keep-temp`: keep compile/run temporary directories for debugging.
 
 Qwen3.5 generation defaults in the script:
 
@@ -167,7 +204,7 @@ The local Hugging Face path does not implement an extra custom `presence_penalty
 
 ## CUDABench Evaluation
 
-`eval_scem_cudabench.py` generates CUDA programs for `external/CUDABench/Datasets/CUDABench-Set.jsonl` and evaluates only:
+`scripts/eval.py` generates CUDA programs for `external/CUDABench/Datasets/CUDABench-Set.jsonl` and evaluates only:
 
 - compile accuracy
 - functionality accuracy
@@ -196,7 +233,7 @@ If `compare.py` prints `F`, functionality is counted as failed.
 By default, no SCEM checkpoint is loaded. This evaluates the plain Qwen3.5-0.8B backbone and is the first baseline:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path ./models/Qwen3.5-0.8B \
   --output-dir ./eval_outputs/qwen35_baseline \
   --level level3_prompt \
@@ -206,7 +243,7 @@ By default, no SCEM checkpoint is loaded. This evaluates the plain Qwen3.5-0.8B 
 For a quick smoke test:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --output-dir /tmp/scem_cudabench_smoke \
   --limit 1 \
   --max-new-tokens 4
@@ -217,7 +254,7 @@ For a quick smoke test:
 After training, pass a SCEM checkpoint:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path ./models/Qwen3.5-0.8B \
   --scem-checkpoint ./checkpoints/scem_qwen35/step-1000/scem.pt \
   --output-dir ./eval_outputs/scem_qwen35_step1000 \
@@ -251,7 +288,7 @@ In `eval_results.jsonl`, compile and functionality fields are written before lon
 To skip generation and only rerun compile/functionality validation:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python eval_scem_cudabench.py \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --trust-generated \
   --results-jsonl ./eval_outputs/qwen35_baseline/generated_results.jsonl \
   --output-dir ./eval_outputs/qwen35_baseline_recheck \
@@ -310,7 +347,7 @@ Additional random points are added as regularization.
 
 ### Training Data
 
-`train_scem.py` supports these record formats:
+`scripts/train.py` supports these record formats:
 
 JSONL or JSON object/list with `text`:
 
@@ -357,7 +394,7 @@ Token lengths are often above 2048, so `--max-length 4096` is recommended if mem
 Freeze backbone and train only SCEM:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python train_scem.py \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py \
   --train-file data/train.json \
   --model-path ./models/Qwen3.5-0.8B \
   --output-dir ./checkpoints/scem_qwen35 \
@@ -371,7 +408,7 @@ Freeze backbone and train only SCEM:
 LoRA + SCEM:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python train_scem.py \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py \
   --train-file data/train.json \
   --model-path ./models/Qwen3.5-0.8B \
   --output-dir ./checkpoints/scem_qwen35_lora \
@@ -443,19 +480,19 @@ Training saves checkpoints under:
 SCEM shape test:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python test_scem.py
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/smoke_test.py
 ```
 
 Short generation test:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python generate_qwen_scem.py --max-new-tokens 4
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py --max-new-tokens 4
 ```
 
 Training smoke test requires a small JSON/JSONL file:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python train_scem.py \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py \
   --train-file data/train.json \
   --output-dir /tmp/scem_smoke \
   --max-length 512 \
