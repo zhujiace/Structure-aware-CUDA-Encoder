@@ -23,7 +23,7 @@ def parse_args():
     parser.add_argument("--model-path", default="./models/Qwen3.5-0.8B")
     parser.add_argument("--level", choices=["level1_prompt", "level2_prompt", "level3_prompt"], default="level3_prompt")
     parser.add_argument("--gpu-model", default="NVIDIA GeForce RTX 4090")
-    parser.add_argument("--task-id", type=int, default=None)
+    parser.add_argument("--task-id", type=int, default=None, help="e.g. 115: Matrix_Multiplication")
     parser.add_argument("--task-ids", default=None, help="Comma-separated task ids, e.g. 1,5,9")
     parser.add_argument("--start-id", type=int, default=None)
     parser.add_argument("--end-id", type=int, default=None)
