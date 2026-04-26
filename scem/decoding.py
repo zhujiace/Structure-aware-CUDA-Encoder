@@ -33,11 +33,19 @@ class SCEMLogitsProcessor(LogitsProcessor):
         self.state_provider = state_provider
         self.hidden_state_provider = hidden_state_provider
         self.alpha = alpha
+        self._logged_once = False
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
         hidden_state = self.hidden_state_provider()
         state = self.state_provider(input_ids).to(scores.device)
         output = self.scem(hidden_state=hidden_state.to(scores.device), state=state)
+        if not self._logged_once:
+            mean_abs_bias = output.bias.abs().mean().item()
+            print(
+                f"[SCEM] first logits adjustment applied: alpha={self.alpha} "
+                f"mean_abs_bias={mean_abs_bias:.6f}"
+            )
+            self._logged_once = True
         return scores + self.alpha * output.bias.to(dtype=scores.dtype)
 
 
