@@ -38,6 +38,7 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=None, help="Evaluate only the first N tasks.")
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--alpha", type=float, default=0.3)
+    parser.add_argument("--use-scem-prompt", action="store_true", help="Append SCEM-side prompt constraints without modifying external/CUDABench.")
     parser.add_argument("--task-family", default="unknown")
     parser.add_argument("--tensor-rank", type=int, default=0)
     parser.add_argument("--compile-timeout", type=int, default=60)
@@ -53,6 +54,7 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
         model_path=args.model_path,
         max_new_tokens=args.max_new_tokens,
         system_prompt=helpers.system_prompt,
+        use_scem_prompt=args.use_scem_prompt,
         enable_scem=bool(args.scem_checkpoint),
         scem_checkpoint=args.scem_checkpoint,
         alpha=args.alpha,

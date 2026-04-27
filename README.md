@@ -176,6 +176,15 @@ Example: enable SCEM with a checkpoint:
   --alpha 0.3
 ```
 
+Example: keep the external CUDABench task prompt unchanged but enable SCEM-side system constraints:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py \
+  --task-id 0 \
+  --use-scem-prompt \
+  --max-new-tokens 128
+```
+
 Important arguments:
 
 - `--task-id`: single CUDABench task id.
@@ -184,6 +193,7 @@ Important arguments:
 - `--limit`: evaluate the first N tasks if no explicit ids are given.
 - `--check-compile`: run `nvcc` on the extracted CUDA code.
 - `--check-functionality`: run `gen.py -> kernel -> compare.py`.
+- `--use-scem-prompt`: enable SCEM-side supplemental system constraints without editing the external CUDABench prompt template.
 - `--enable-scem`: enable SCEM during generation.
 - `--scem-checkpoint`: trained `scem.pt` path. If omitted while `--enable-scem` is set, the script uses an untrained zero-effect SCEM module.
 - `--alpha`: SCEM bias strength.
@@ -261,6 +271,18 @@ After training, pass a SCEM checkpoint:
   --level level3_prompt \
   --num-samples 1 \
   --alpha 0.3
+```
+
+To evaluate the same model with extra SCEM-side system constraints enabled:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
+  --model-path ./models/Qwen3.5-0.8B \
+  --output-dir ./eval_outputs/qwen35_scem_prompt_limit5 \
+  --level level3_prompt \
+  --limit 5 \
+  --max-new-tokens 128 \
+  --use-scem-prompt
 ```
 
 ### Evaluation Outputs

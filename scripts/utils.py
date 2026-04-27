@@ -12,7 +12,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessorList
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    LogitsProcessorList,
+    StoppingCriteria,
+    StoppingCriteriaList,
+)
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -25,6 +31,33 @@ QWEN35_GENERATION_KWARGS = {
     "top_p": 1.0,
     "top_k": 20,
 }
+
+SCEM_SUPPLEMENTAL_SYSTEM_PROMPT = """
+### SCEM SUPPLEMENTAL CONSTRAINTS
+
+The base instructions still apply. In addition, follow these constraints strictly:
+
+1. Produce a minimal, literal, compilable CUDA/C++ program.
+   - Do not invent frameworks, wrappers, DSLs, or placeholder types.
+   - Do not emit pseudocode, commentary, markdown outside the code block, or partial templates.
+
+2. Use only standard CUDA/C++ constructs that are explicitly needed for this task.
+   - Do not invent helper APIs such as custom runtime abstractions, fake tensor classes, or undefined utility functions.
+   - Do not call nonexistent CUDA APIs.
+
+3. Keep the structure simple and concrete.
+   - Include the required boilerplate exactly once.
+   - Add one kernel and a straightforward main function that allocates memory, copies inputs, launches the kernel, copies outputs back, writes the output, and frees memory.
+   - Use explicit numeric dimensions from the task statement.
+
+4. Prefer correctness and compilability over sophistication.
+   - If the exact optimized algorithm is uncertain, emit the simplest correct implementation that matches the requested I/O contract.
+   - Avoid aggressive optimization patterns unless they are clearly necessary and can be implemented completely.
+
+5. Stop cleanly.
+   - End after the complete source file.
+   - Do not leave unterminated includes, unfinished functions, or dangling code fences.
+""".strip()
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -44,6 +77,27 @@ class CUDABenchHelpers:
     run_script_as_function: Any
     prompt_template: str
     system_prompt: str
+
+
+class FirstCodeBlockStoppingCriteria(StoppingCriteria):
+    """Stop generation once the first fenced code block is fully closed."""
+
+    def __init__(self, tokenizer, prompt_length: int):
+        self.tokenizer = tokenizer
+        self.prompt_length = prompt_length
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
+        if input_ids.shape[0] != 1:
+            return False
+        generated_ids = input_ids[0, self.prompt_length :]
+        if generated_ids.numel() == 0:
+            return False
+        text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
+        start = text.find("```")
+        if start < 0:
+            return False
+        end = text.find("```", start + 3)
+        return end >= 0
 
 
 def resolve_cudabench_paths(
@@ -87,6 +141,12 @@ def load_cudabench_helpers(cudabench_root: Path) -> CUDABenchHelpers:
         prompt_template=prompt_module.PROMPT,
         system_prompt=prompt_module.SYSTEM_PROMPT,
     )
+
+
+def compose_system_prompt(base_prompt: str, use_scem_prompt: bool = False) -> str:
+    if not use_scem_prompt:
+        return base_prompt
+    return f"{base_prompt.rstrip()}\n\n{SCEM_SUPPLEMENTAL_SYSTEM_PROMPT}"
 
 
 def load_jsonl(path: Path) -> List[Dict[str, Any]]:
@@ -193,6 +253,7 @@ class LocalGenerator:
         model_path: str,
         max_new_tokens: int,
         system_prompt: str,
+        use_scem_prompt: bool = False,
         enable_scem: bool = False,
         scem_checkpoint: Optional[str] = None,
         alpha: float = 0.3,
@@ -200,7 +261,7 @@ class LocalGenerator:
         tensor_rank: int = 0,
     ):
         self.max_new_tokens = max_new_tokens
-        self.system_prompt = system_prompt
+        self.system_prompt = compose_system_prompt(system_prompt, use_scem_prompt=use_scem_prompt)
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.float16 if self.device == "cuda" else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
@@ -249,6 +310,9 @@ class LocalGenerator:
         ).to(self.device)
         generation_kwargs = dict(QWEN35_GENERATION_KWARGS)
         generation_kwargs["max_new_tokens"] = self.max_new_tokens
+        generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
+            [FirstCodeBlockStoppingCriteria(self.tokenizer, inputs["input_ids"].shape[-1])]
+        )
         if self.logits_processor is not None:
             generation_kwargs["logits_processor"] = self.logits_processor
 

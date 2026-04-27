@@ -31,6 +31,7 @@ def parse_args():
     parser.add_argument("--max-new-tokens", type=int, default=32768)
     parser.add_argument("--check-compile", action="store_true")
     parser.add_argument("--check-functionality", action="store_true")
+    parser.add_argument("--use-scem-prompt", action="store_true", help="Append SCEM-side prompt constraints without modifying external/CUDABench.")
     parser.add_argument("--enable-scem", action="store_true")
     parser.add_argument("--scem-checkpoint", default=None)
     parser.add_argument("--alpha", type=float, default=0.3)
@@ -71,6 +72,7 @@ def main():
         model_path=args.model_path,
         max_new_tokens=args.max_new_tokens,
         system_prompt=helpers.system_prompt,
+        use_scem_prompt=args.use_scem_prompt,
         enable_scem=args.enable_scem,
         scem_checkpoint=args.scem_checkpoint,
         alpha=args.alpha,
