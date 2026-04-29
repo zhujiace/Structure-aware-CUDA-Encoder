@@ -37,8 +37,14 @@ def parse_args():
     parser.add_argument("--num-samples", type=int, default=1)
     parser.add_argument("--limit", type=int, default=None, help="Evaluate only the first N tasks.")
     parser.add_argument("--start-index", type=int, default=0)
+    parser.add_argument(
+        "--task-stride",
+        type=int,
+        default=1,
+        help="Evaluate every Nth task after --start-index. Use 5 to sample one kernel from each five-task group.",
+    )
     parser.add_argument("--alpha", type=float, default=0.3)
-    parser.add_argument("--use-scem-prompt", action="store_true", help="Append SCEM-side prompt constraints without modifying external/CUDABench.")
+    parser.add_argument("--use-scem-prompt", action="store_true", help="Enable SCEM-side supplemental system constraints without modifying external/CUDABench.")
     parser.add_argument("--task-family", default="unknown")
     parser.add_argument("--tensor-rank", type=int, default=0)
     parser.add_argument("--compile-timeout", type=int, default=60)
@@ -47,6 +53,15 @@ def parse_args():
     parser.add_argument("--trust-generated", action="store_true", help="Skip generation and evaluate existing results.jsonl.")
     parser.add_argument("--results-jsonl", default=None, help="Existing generated results JSONL for --trust-generated.")
     return parser.parse_args()
+
+
+def select_eval_tasks(tasks: List[Dict[str, Any]], stride: int, limit: int | None) -> List[Dict[str, Any]]:
+    if stride < 1:
+        raise ValueError("--task-stride must be >= 1")
+    selected = tasks[::stride]
+    if limit is not None:
+        selected = selected[:limit]
+    return selected
 
 
 def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpers) -> None:
@@ -189,6 +204,9 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
     summary = {
         "total_tasks": total_tasks,
         "total_versions": total_versions,
+        "start_index": args.start_index,
+        "task_stride": args.task_stride,
+        "limit": args.limit,
         "compile_accuracy": safe_div(compile_ok_versions, total_versions),
         "functionality_accuracy": safe_div(function_ok_versions, total_versions),
         "task_compile_pass_rate": safe_div(task_compile_pass, total_tasks),
@@ -211,7 +229,11 @@ def main():
     args = parse_args()
     cudabench_root, dataset_path = resolve_cudabench_paths(args.cudabench_root, args.dataset)
     helpers = load_cudabench_helpers(cudabench_root)
-    tasks = load_cudabench_tasks(dataset_path, args.start_index, args.limit)
+    tasks = select_eval_tasks(
+        load_cudabench_tasks(dataset_path, args.start_index, limit=None),
+        stride=args.task_stride,
+        limit=args.limit,
+    )
     tasks_by_id = {int(task["id"]): task for task in tasks}
     output_dir = Path(args.output_dir)
     results_path = Path(args.results_jsonl) if args.results_jsonl else output_dir / "generated_results.jsonl"

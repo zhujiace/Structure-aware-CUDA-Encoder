@@ -6,7 +6,7 @@ SCEM is a lightweight structure-aware module for text-to-CUDA generation. It doe
 z_final = z_lm + alpha * b_scem
 ```
 
-The current repository uses local Qwen3.5-0.8B as the default integration target, while the core SCEM module is model-agnostic.
+The current repository uses local Qwen3.5-0.8B as the default integration target, while the core SCEM module is model-agnostic. Larger local Qwen3.5 backbones are stored under `/data/projects/scem/models/` to avoid filling the user home directory.
 
 ## Goal
 
@@ -102,6 +102,33 @@ scem_config = SCEMConfig.from_lm_config(model.config)
 ```
 
 This reads `hidden_size` and `vocab_size` from either `config` or `config.text_config`.
+
+## Local Backbone Models
+
+The default 0.8B model remains under the repository-local ignored `models/` directory. Larger downloaded models should use the shared data path:
+
+```text
+/data/projects/scem/models/Qwen3.5-4B
+/data/projects/scem/models/Qwen3.5-9B
+```
+
+Both models are compatible with the current Hugging Face/Qwen integration path:
+
+```text
+Qwen3.5-4B: hidden_size=2560, vocab_size=248320
+Qwen3.5-9B: hidden_size=4096, vocab_size=248320
+```
+
+Use them by passing `--model-path`:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --task-id 0 \
+  --use-scem-prompt
+```
+
+SCEM checkpoints are backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same.
 
 ## CUDA State Extraction
 
@@ -257,6 +284,18 @@ For a quick smoke test:
   --output-dir /tmp/scem_cudabench_smoke \
   --limit 1 \
   --max-new-tokens 4
+```
+
+To run a first-pass 4B backbone baseline by evaluating one task from each five-task CUDABench group:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --output-dir ./eval_outputs/qwen35_4b_baseline_stride5 \
+  --level level3_prompt \
+  --task-stride 5 \
+  --num-samples 1 \
+  --use-scem-prompt
 ```
 
 ### SCEM Evaluation

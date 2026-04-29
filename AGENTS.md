@@ -78,6 +78,13 @@ These are first-class project files and should be kept clean and well-structured
   - Gitignored.
   - Do not modify.
 
+- `/data/projects/scem/models/`
+  - Shared storage for larger local backbone models.
+  - Current downloaded models:
+    - `Qwen3.5-4B`
+    - `Qwen3.5-9B`
+  - Use this path for large model files instead of the user home or repo-local `models/` directory.
+
 - `checkpoints/`
   - Training artifacts.
   - Gitignored.
@@ -293,6 +300,9 @@ Current factual status:
 - The project has not yet produced a trained SCEM checkpoint.
 - The only baseline that has been tried so far is `Qwen3.5-0.8B`.
 - That baseline did not solve CUDABench tasks in a usable way.
+- Larger local backbones are now available under `/data/projects/scem/models/`.
+- `Qwen3.5-4B` and `Qwen3.5-9B` are compatible with the current Hugging Face/Qwen integration path.
+- SCEM checkpoints are backbone-shape specific; retrain SCEM for 4B or 9B instead of reusing a 0.8B SCEM checkpoint.
 - Therefore, the next session should focus primarily on experiments, not basic infrastructure.
 
 This means the next likely tasks are:
