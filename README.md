@@ -291,8 +291,8 @@ To run a first-pass 4B backbone baseline by evaluating one task from each five-t
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path /data/projects/scem/models/Qwen3.5-4B \
-  --output-dir ./eval_outputs/qwen35_4b_baseline_stride5 \
-  --level level3_prompt \
+  --output-dir ./eval_outputs/qwen35_4b_baseline_level1_stride5 \
+  --level level1_prompt \
   --task-stride 5 \
   --num-samples 1 \
   --use-scem-prompt
@@ -335,10 +335,12 @@ summary.json              aggregate metrics
 temp_eval/                temporary compile/run directories, only kept with --keep-temp
 ```
 
-In `eval_results.jsonl`, compile and functionality fields are written before long fields such as `prompt`, `code*`, and `response*` so results remain easy to inspect in IDEs.
+In `eval_results.jsonl`, compile/functionality fields plus run metadata such as `level`, `model_path`, and `scem_checkpoint` are written before long fields such as `prompt`, `code*`, and `response*` so results remain easy to inspect in IDEs.
 
 `summary.json` reports both version-level and task-level metrics:
 
+- `level`: CUDABench prompt level used for generation.
+- `model_path`: backbone model used for generation.
 - `compile_accuracy`: compiled samples / total samples
 - `functionality_accuracy`: functional samples / total samples
 - `task_compile_pass_rate`: tasks with at least one compiling sample / total tasks

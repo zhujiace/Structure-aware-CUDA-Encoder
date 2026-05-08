@@ -136,6 +136,9 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
                     "task_name": task_name,
                     "compile_pass": False,
                     "functionality_pass": False,
+                    "level": record.get("level", args.level),
+                    "model_path": record.get("model_path", args.model_path),
+                    "scem_checkpoint": record.get("scem_checkpoint", args.scem_checkpoint),
                     "error": "missing dataset task",
                     "prompt": record.get("prompt", ""),
                 }
@@ -183,6 +186,9 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
                 "compile_pass": task_has_compile,
                 "functionality_pass": task_has_function,
                 **sample_results,
+                "level": record.get("level", args.level),
+                "model_path": record.get("model_path", args.model_path),
+                "scem_checkpoint": record.get("scem_checkpoint", args.scem_checkpoint),
                 "prompt": record.get("prompt", ""),
             }
             for sample_idx in range(1, args.num_samples + 1):
@@ -204,6 +210,11 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
     summary = {
         "total_tasks": total_tasks,
         "total_versions": total_versions,
+        "level": args.level,
+        "model_path": args.model_path,
+        "scem_checkpoint": args.scem_checkpoint,
+        "use_scem_prompt": args.use_scem_prompt,
+        "num_samples": args.num_samples,
         "start_index": args.start_index,
         "task_stride": args.task_stride,
         "limit": args.limit,
