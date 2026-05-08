@@ -143,12 +143,15 @@ Purpose:
 - Train SCEM with region-aware multi-point SFT.
 - Default behavior is frozen backbone + train SCEM.
 - Optional LoRA warm-up path exists.
+- Uses Hugging Face Accelerate; launch with `accelerate launch --num_processes N` to use 1-4 GPUs.
 
 Important behavior:
 
 - Supports `text`, `prompt/completion`, `messages`, and `instruction/input/output` formats.
 - Supports `.json` and `.jsonl`.
 - Uses region anchors plus random points for next-token training.
+- Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
+- For the current `data/train.json`, `--max-length 4096` covers about 99.6% of records; `--max-length 3072 --skip-overlength` covers about 94.6% without training on truncated records.
 
 ### `scripts/eval.py`
 

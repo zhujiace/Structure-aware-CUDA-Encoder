@@ -450,14 +450,20 @@ output
 
 All checked records include a CUDA code fence, `__global__`, and `cuda_runtime.h`. With the default region-aware settings, it expands to about 45k training points.
 
-Token lengths are often above 2048, so `--max-length 4096` is recommended if memory allows.
+Token lengths are often above 2048. Measured with the Qwen3.5 tokenizer:
+
+```text
+p50=2113, p75=2413, p90=2813, p95=3097, p99=3665, max=5794
+```
+
+Use `--max-length 4096` when memory allows; it covers about 99.6% of the current records. Use `--max-length 3072 --skip-overlength` for a memory-friendlier run that avoids training on truncated examples and still covers about 94.6% of records. `--max-length 2048` is mainly for smoke tests because it covers only about 42.4% of records.
 
 ### Recommended Training Command
 
 Freeze backbone and train only SCEM:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py \
+/home/zhujiace/anaconda3/envs/llama/bin/accelerate launch --num_processes 1 scripts/train.py \
   --train-file data/train.json \
   --model-path ./models/Qwen3.5-0.8B \
   --output-dir ./checkpoints/scem_qwen35 \
@@ -471,16 +477,20 @@ Freeze backbone and train only SCEM:
 LoRA + SCEM:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py \
+/home/zhujiace/anaconda3/envs/llama/bin/accelerate launch --num_processes 4 scripts/train.py \
   --train-file data/train.json \
-  --model-path ./models/Qwen3.5-0.8B \
-  --output-dir ./checkpoints/scem_qwen35_lora \
-  --max-length 4096 \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --output-dir /project/scem/checkpoints/scem_qwen35_4b_lora \
+  --max-length 3072 \
+  --skip-overlength \
   --batch-size 1 \
   --grad-accum-steps 16 \
   --use-lora \
-  --gradient-checkpointing
+  --gradient-checkpointing \
+  --mixed-precision bf16
 ```
+
+Set `CUDA_VISIBLE_DEVICES` before `accelerate launch` to choose a subset of GPUs, for example `CUDA_VISIBLE_DEVICES=0,1` with `--num_processes 2`.
 
 ### Training Arguments
 
@@ -488,6 +498,9 @@ Data and sequence:
 
 - `--train-file`: JSON or JSONL training file.
 - `--max-length`: max tokenized length after prompt + completion formatting.
+- `--skip-overlength`: skip examples longer than `--max-length` instead of truncating them.
+- `--max-raw-examples`: read only the first N raw records, intended for smoke tests.
+- `--max-training-points`: keep only the first N expanded training points, intended for smoke tests.
 - `--min-prefix-length`: minimum prefix length before a target token can be sampled.
 - `--region-points-per-example`: max region-aware points per raw sample.
 - `--random-points-per-example`: random points per raw sample.
@@ -516,6 +529,8 @@ Backbone:
 - `--use-lora`: add LoRA adapters through PEFT.
 - `--lora-r`, `--lora-alpha`, `--lora-dropout`: LoRA hyperparameters.
 - `--gradient-checkpointing`: enable checkpointing for larger models.
+- `--mixed-precision`: Accelerate mixed precision mode, usually `bf16` on A40.
+- `--model-dtype`: optional explicit model load dtype.
 
 ## Checkpoints
 
@@ -528,6 +543,8 @@ Training saves checkpoints under:
   tokenizer files
   lora/                only when --use-lora is enabled
 ```
+
+Load a LoRA adapter during demo/evaluation with `--lora-checkpoint <checkpoint>/lora`.
 
 `scem.pt` contains:
 

@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument("--dataset", default=None)
     parser.add_argument("--model-path", default="./models/Qwen3.5-0.8B")
     parser.add_argument("--scem-checkpoint", default=None, help="Optional path to scem.pt. Omit for backbone baseline.")
+    parser.add_argument("--lora-checkpoint", default=None, help="Optional path to a PEFT/LoRA adapter directory.")
     parser.add_argument("--output-dir", default="./eval_outputs/cudabench_qwen35_baseline")
     parser.add_argument("--level", choices=["level1_prompt", "level2_prompt", "level3_prompt"], default="level3_prompt")
     parser.add_argument("--gpu-model", default="NVIDIA GeForce RTX 4090")
@@ -72,6 +73,7 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
         use_scem_prompt=args.use_scem_prompt,
         enable_scem=bool(args.scem_checkpoint),
         scem_checkpoint=args.scem_checkpoint,
+        lora_checkpoint=args.lora_checkpoint,
         alpha=args.alpha,
         task_family=args.task_family,
         tensor_rank=args.tensor_rank,
@@ -94,6 +96,7 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
                 "level": args.level,
                 "model_path": args.model_path,
                 "scem_checkpoint": args.scem_checkpoint,
+                "lora_checkpoint": args.lora_checkpoint,
             }
             print(f"[GEN {index}/{len(tasks)}] id={task_id} {task['task_name']}")
             for sample_idx in range(1, args.num_samples + 1):
@@ -139,6 +142,7 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
                     "level": record.get("level", args.level),
                     "model_path": record.get("model_path", args.model_path),
                     "scem_checkpoint": record.get("scem_checkpoint", args.scem_checkpoint),
+                    "lora_checkpoint": record.get("lora_checkpoint", args.lora_checkpoint),
                     "error": "missing dataset task",
                     "prompt": record.get("prompt", ""),
                 }
@@ -189,6 +193,7 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
                 "level": record.get("level", args.level),
                 "model_path": record.get("model_path", args.model_path),
                 "scem_checkpoint": record.get("scem_checkpoint", args.scem_checkpoint),
+                "lora_checkpoint": record.get("lora_checkpoint", args.lora_checkpoint),
                 "prompt": record.get("prompt", ""),
             }
             for sample_idx in range(1, args.num_samples + 1):
@@ -213,6 +218,7 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
         "level": args.level,
         "model_path": args.model_path,
         "scem_checkpoint": args.scem_checkpoint,
+        "lora_checkpoint": args.lora_checkpoint,
         "use_scem_prompt": args.use_scem_prompt,
         "num_samples": args.num_samples,
         "start_index": args.start_index,

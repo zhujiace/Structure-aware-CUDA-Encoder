@@ -34,6 +34,7 @@ def parse_args():
     parser.add_argument("--use-scem-prompt", action="store_true", help="Enable SCEM-side supplemental system constraints without modifying external/CUDABench.")
     parser.add_argument("--enable-scem", action="store_true")
     parser.add_argument("--scem-checkpoint", default=None)
+    parser.add_argument("--lora-checkpoint", default=None)
     parser.add_argument("--alpha", type=float, default=0.3)
     parser.add_argument("--task-family", default="unknown")
     parser.add_argument("--tensor-rank", type=int, default=0)
@@ -75,6 +76,7 @@ def main():
         use_scem_prompt=args.use_scem_prompt,
         enable_scem=args.enable_scem,
         scem_checkpoint=args.scem_checkpoint,
+        lora_checkpoint=args.lora_checkpoint,
         alpha=args.alpha,
         task_family=args.task_family,
         tensor_rank=args.tensor_rank,

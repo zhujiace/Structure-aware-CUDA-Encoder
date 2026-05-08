@@ -247,6 +247,16 @@ def load_scem_checkpoint(path: str, model_config, device: str, dtype: torch.dtyp
     return scem
 
 
+def disable_peft_bnb_dispatchers() -> None:
+    import peft.import_utils as peft_import_utils
+    import peft.tuners.lora.model as peft_lora_model
+
+    peft_import_utils.is_bnb_available = lambda: False
+    peft_import_utils.is_bnb_4bit_available = lambda: False
+    peft_lora_model.is_bnb_available = lambda: False
+    peft_lora_model.is_bnb_4bit_available = lambda: False
+
+
 class LocalGenerator:
     def __init__(
         self,
@@ -256,6 +266,7 @@ class LocalGenerator:
         use_scem_prompt: bool = False,
         enable_scem: bool = False,
         scem_checkpoint: Optional[str] = None,
+        lora_checkpoint: Optional[str] = None,
         alpha: float = 0.3,
         task_family: str = "unknown",
         tensor_rank: int = 0,
@@ -266,6 +277,11 @@ class LocalGenerator:
         dtype = torch.float16 if self.device == "cuda" else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
         self.model = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype)
+        if lora_checkpoint:
+            disable_peft_bnb_dispatchers()
+            from peft import PeftModel
+
+            self.model = PeftModel.from_pretrained(self.model, lora_checkpoint)
         self.model.to(self.device)
         self.model.eval()
         self.logits_processor = None

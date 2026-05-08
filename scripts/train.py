@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
+from accelerate import Accelerator
+from accelerate.utils import set_seed
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
@@ -27,6 +29,9 @@ def parse_args():
     parser.add_argument("--output-dir", default="./checkpoints/scem")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--min-prefix-length", type=int, default=16)
+    parser.add_argument("--skip-overlength", action="store_true", help="Skip examples longer than --max-length instead of truncating them.")
+    parser.add_argument("--max-raw-examples", type=int, default=None, help="Read at most this many raw records; useful for smoke tests.")
+    parser.add_argument("--max-training-points", type=int, default=None, help="Keep at most this many expanded training points; useful for smoke tests.")
     parser.add_argument("--region-points-per-example", type=int, default=8)
     parser.add_argument("--random-points-per-example", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -47,7 +52,10 @@ def parse_args():
     parser.add_argument("--lora-r", type=int, default=8)
     parser.add_argument("--lora-alpha", type=int, default=16)
     parser.add_argument("--lora-dropout", type=float, default=0.05)
+    parser.add_argument("--allow-bitsandbytes-lora", action="store_true", help="Allow PEFT to use bitsandbytes LoRA dispatchers if the local bnb install is known-good.")
     parser.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--mixed-precision", choices=["no", "fp16", "bf16"], default="bf16")
+    parser.add_argument("--model-dtype", choices=["auto", "float32", "float16", "bfloat16"], default="auto")
     return parser.parse_args()
 
 
@@ -80,6 +88,9 @@ class PrefixNextTokenDataset(Dataset):
         min_prefix_length: int,
         region_points_per_example: int,
         random_points_per_example: int,
+        skip_overlength: bool = False,
+        max_raw_examples: Optional[int] = None,
+        max_training_points: Optional[int] = None,
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -88,17 +99,23 @@ class PrefixNextTokenDataset(Dataset):
         self.random_points_per_example = random_points_per_example
         self.examples = []
         raw_examples = 0
+        skipped_overlength = 0
         for record in self._iter_records(path):
+            if max_raw_examples is not None and raw_examples >= max_raw_examples:
+                break
             text, target_char_start = self._record_to_text(record)
             raw_examples += 1
             encoded = tokenizer(
                 text,
                 add_special_tokens=False,
                 return_offsets_mapping=True,
-                truncation=True,
-                max_length=max_length,
+                truncation=not skip_overlength,
+                max_length=max_length if not skip_overlength else None,
             )
             ids = encoded.input_ids
+            if skip_overlength and len(ids) > max_length:
+                skipped_overlength += 1
+                continue
             if len(ids) > min_prefix_length:
                 offsets = encoded.offset_mapping
                 self.examples.extend(
@@ -109,9 +126,15 @@ class PrefixNextTokenDataset(Dataset):
                         target_char_start=target_char_start,
                     )
                 )
+            if max_training_points is not None and len(self.examples) >= max_training_points:
+                self.examples = self.examples[:max_training_points]
+                break
         if not self.examples:
             raise ValueError("No usable training examples found")
-        print(f"Loaded {len(self.examples)} training points from {raw_examples} raw examples")
+        message = f"Loaded {len(self.examples)} training points from {raw_examples} raw examples"
+        if skipped_overlength:
+            message += f" ({skipped_overlength} overlength examples skipped)"
+        print(message)
 
     def _iter_records(self, path: str):
         if path.endswith(".json"):
@@ -294,6 +317,14 @@ def configure_backbone(model, args):
 
     if args.use_lora:
         from peft import LoraConfig, get_peft_model
+        if not args.allow_bitsandbytes_lora:
+            import peft.import_utils as peft_import_utils
+            import peft.tuners.lora.model as peft_lora_model
+
+            peft_import_utils.is_bnb_available = lambda: False
+            peft_import_utils.is_bnb_4bit_available = lambda: False
+            peft_lora_model.is_bnb_available = lambda: False
+            peft_lora_model.is_bnb_4bit_available = lambda: False
 
         if args.freeze_backbone:
             for parameter in model.parameters():
@@ -307,41 +338,68 @@ def configure_backbone(model, args):
             target_modules="all-linear",
         )
         model = get_peft_model(model, lora_config)
+        if args.gradient_checkpointing and hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
         model.print_trainable_parameters()
     return model
 
 
-def save_checkpoint(output_dir: str, scem: SCEModule, model, tokenizer, args, step: int):
+def get_lm_config(model):
+    if hasattr(model, "get_base_model"):
+        return model.get_base_model().config
+    return model.config
+
+
+def resolve_model_dtype(args, accelerator: Accelerator) -> torch.dtype:
+    if accelerator.device.type != "cuda":
+        return torch.float32
+    if args.model_dtype == "float32":
+        return torch.float32
+    if args.model_dtype == "float16":
+        return torch.float16
+    if args.model_dtype == "bfloat16":
+        return torch.bfloat16
+    if accelerator.mixed_precision == "bf16" and torch.cuda.is_bf16_supported():
+        return torch.bfloat16
+    if accelerator.mixed_precision == "fp16":
+        return torch.float16
+    return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+
+
+def save_checkpoint(output_dir: str, scem: SCEModule, model, tokenizer, args, step: int, accelerator: Optional[Accelerator] = None):
     path = os.path.join(output_dir, f"step-{step}")
     os.makedirs(path, exist_ok=True)
-    torch.save({"config": scem.config, "state_dict": scem.state_dict()}, os.path.join(path, "scem.pt"))
+    scem_to_save = accelerator.unwrap_model(scem) if accelerator is not None else scem
+    model_to_save = accelerator.unwrap_model(model) if accelerator is not None else model
+    torch.save({"config": scem_to_save.config, "state_dict": scem_to_save.state_dict()}, os.path.join(path, "scem.pt"))
     tokenizer.save_pretrained(path)
     with open(os.path.join(path, "training_args.json"), "w", encoding="utf-8") as handle:
         json.dump(vars(args), handle, ensure_ascii=False, indent=2)
-    if args.use_lora and hasattr(model, "save_pretrained"):
-        model.save_pretrained(os.path.join(path, "lora"))
+    if args.use_lora and hasattr(model_to_save, "save_pretrained"):
+        model_to_save.save_pretrained(os.path.join(path, "lora"))
 
 
 def main():
     args = parse_args()
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
+    mixed_precision = args.mixed_precision if torch.cuda.is_available() else "no"
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.grad_accum_steps,
+        mixed_precision=mixed_precision,
+    )
+    random.seed(args.seed + accelerator.process_index)
+    set_seed(args.seed)
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if device == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
-    if device == "cpu":
-        dtype = torch.float32
+    dtype = resolve_model_dtype(args, accelerator)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, use_fast=True)
     model = AutoModelForCausalLM.from_pretrained(args.model_path, dtype=dtype)
     model = configure_backbone(model, args)
-    model.to(device)
     model.train(args.use_lora)
     if not args.use_lora:
         model.eval()
 
-    scem_config = SCEMConfig.from_lm_config(model.config, bias_rank=args.bias_rank)
-    scem = SCEModule(scem_config).to(device=device, dtype=next(model.parameters()).dtype)
+    scem_config = SCEMConfig.from_lm_config(get_lm_config(model), bias_rank=args.bias_rank)
+    scem = SCEModule(scem_config).to(dtype=next(model.parameters()).dtype)
     scem.train()
 
     dataset = PrefixNextTokenDataset(
@@ -351,6 +409,9 @@ def main():
         min_prefix_length=args.min_prefix_length,
         region_points_per_example=args.region_points_per_example,
         random_points_per_example=args.random_points_per_example,
+        skip_overlength=args.skip_overlength,
+        max_raw_examples=args.max_raw_examples,
+        max_training_points=args.max_training_points,
     )
     dataloader = DataLoader(
         dataset,
@@ -362,71 +423,83 @@ def main():
 
     trainable_params = list(scem.parameters()) + [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
-    total_steps = math.ceil(len(dataloader) * args.epochs / args.grad_accum_steps)
+    total_steps = math.ceil(len(dataloader) * args.epochs / (args.grad_accum_steps * accelerator.num_processes))
+    total_steps = max(1, total_steps)
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-    scaler = torch.amp.GradScaler("cuda", enabled=device == "cuda" and dtype == torch.float16)
     extractor = CudaProgramStateExtractor(task_family=args.task_family, tensor_rank=args.tensor_rank)
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    if accelerator.is_main_process:
+        os.makedirs(args.output_dir, exist_ok=True)
+    accelerator.wait_for_everyone()
+
+    model, scem, optimizer, dataloader, scheduler = accelerator.prepare(
+        model,
+        scem,
+        optimizer,
+        dataloader,
+        scheduler,
+    )
+    trainable_params = [p for p in list(scem.parameters()) + list(model.parameters()) if p.requires_grad]
+
     global_step = 0
     optimizer.zero_grad(set_to_none=True)
 
     for epoch in range(args.epochs):
         for local_step, batch in enumerate(dataloader):
-            input_ids = batch.input_ids.to(device)
-            attention_mask = batch.attention_mask.to(device)
-            labels = batch.labels.to(device)
+            input_ids = batch.input_ids.to(accelerator.device)
+            attention_mask = batch.attention_mask.to(accelerator.device)
+            labels = batch.labels.to(accelerator.device)
             states = extractor.extract_batch(batch.prefix_texts)
-            state_batch = CudaProgramStateBatch.from_states(states, device=device)
+            state_batch = CudaProgramStateBatch.from_states(states, device=accelerator.device)
 
-            autocast_enabled = device == "cuda"
-            with torch.autocast(device_type=device, dtype=dtype, enabled=autocast_enabled):
-                if args.use_lora:
-                    outputs = model(
-                        input_ids=input_ids,
-                        attention_mask=attention_mask,
-                        output_hidden_states=True,
-                        use_cache=False,
-                    )
-                else:
-                    with torch.no_grad():
+            with accelerator.accumulate(model, scem):
+                with accelerator.autocast():
+                    if args.use_lora:
                         outputs = model(
                             input_ids=input_ids,
                             attention_mask=attention_mask,
                             output_hidden_states=True,
                             use_cache=False,
                         )
-                last_hidden = outputs.hidden_states[-1][:, -1, :]
-                last_logits = outputs.logits[:, -1, :]
-                scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
-                adjusted_logits = last_logits + args.alpha * scem_bias
-                loss = F.cross_entropy(adjusted_logits, labels)
-                loss = loss / args.grad_accum_steps
+                    else:
+                        with torch.no_grad():
+                            outputs = model(
+                                input_ids=input_ids,
+                                attention_mask=attention_mask,
+                                output_hidden_states=True,
+                                use_cache=False,
+                            )
+                    last_hidden = outputs.hidden_states[-1][:, -1, :]
+                    last_logits = outputs.logits[:, -1, :]
+                    scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
+                    adjusted_logits = last_logits + args.alpha * scem_bias
+                    loss = F.cross_entropy(adjusted_logits, labels)
 
-            scaler.scale(loss).backward()
-
-            should_step = (local_step + 1) % args.grad_accum_steps == 0
-            should_step = should_step or (local_step + 1) == len(dataloader)
-            if should_step:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
-                scaler.step(optimizer)
-                scaler.update()
+                accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(trainable_params, 1.0)
+                optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
+
+            if accelerator.sync_gradients:
                 global_step += 1
 
                 if global_step % args.log_steps == 0:
-                    current_loss = loss.item() * args.grad_accum_steps
+                    current_loss = accelerator.gather(loss.detach()).mean().item()
                     lr = scheduler.get_last_lr()[0]
-                    print(f"epoch={epoch} step={global_step} loss={current_loss:.4f} lr={lr:.2e}")
+                    accelerator.print(f"epoch={epoch} step={global_step} loss={current_loss:.4f} lr={lr:.2e}")
 
                 if args.save_steps > 0 and global_step % args.save_steps == 0:
-                    save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step)
+                    if accelerator.is_main_process:
+                        save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step, accelerator)
+                    accelerator.wait_for_everyone()
 
-    save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step)
-    print(f"Training complete. Saved checkpoint to {args.output_dir}/step-{global_step}")
+    if accelerator.is_main_process:
+        save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step, accelerator)
+        print(f"Training complete. Saved checkpoint to {args.output_dir}/step-{global_step}")
+    accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":
