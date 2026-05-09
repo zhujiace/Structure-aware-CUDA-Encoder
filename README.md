@@ -33,6 +33,7 @@ scem/
 scripts/
   demo.py               Interactive CUDABench generation/debug script
   eval.py               CUDABench compile/functionality evaluation
+  harness_eval.py       Kernel-only CUDABench evaluation with fixed bench.cu harness
   train.py              Region-aware multi-point SFT for SCEM
   smoke_test.py         Shape smoke test for SCEM
   utils.py              Shared script utilities for CUDABench and generation
@@ -371,6 +372,33 @@ If CUDABench is stored somewhere else, pass:
 ```bash
 --cudabench-root /path/to/CUDABench
 ```
+
+## Harness Kernel Evaluation
+
+`scripts/harness_eval.py` is a separate evaluation mode for measuring kernel generation ability without requiring the model to generate `main`.
+
+It uses each CUDABench record's `bench.cu` as a fixed harness:
+
+- removes the reference `__global__` kernel from `bench.cu`
+- prompts the model with the task spec, required kernel signature, and fixed `main`
+- asks the model to output only the replacement `__global__` kernel and optional `__device__` helpers
+- inserts the generated kernel back into the fixed harness
+- compiles and runs the same `gen.py -> executable -> compare.py` validation
+
+This should be interpreted separately from standalone `eval.py`: harness evaluation reduces noise from missing `main`/I/O boilerplate and focuses more directly on kernel logic, indexing, guards, synchronization, and write-back behavior.
+
+Example 4B harness baseline:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/harness_eval.py \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --level level1_prompt \
+  --task-stride 5 \
+  --num-samples 1 \
+  --run-name qwen35_4b_harness_level1_stride5
+```
+
+If `--output-dir` is omitted, it creates a unique timestamped directory under `eval_outputs/`, similar to `scripts/eval.py`.
 
 ## Training
 

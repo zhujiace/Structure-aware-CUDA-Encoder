@@ -33,6 +33,7 @@ scem/
 scripts/
   demo.py
   eval.py
+  harness_eval.py
   smoke_test.py
   train.py
   utils.py
@@ -55,6 +56,7 @@ These are first-class project files and should be kept clean and well-structured
 - `scem/qwen_integration.py`
 - `scripts/train.py`
 - `scripts/eval.py`
+- `scripts/harness_eval.py`
 - `scripts/demo.py`
 - `scripts/smoke_test.py`
 - `scripts/utils.py`
@@ -179,6 +181,21 @@ Output field order in `eval_results.jsonl` is intentional:
 - compile/functionality results appear before `prompt`
 - this makes long JSONL lines easier to inspect in IDEs
 
+### `scripts/harness_eval.py`
+
+Purpose:
+
+- Kernel-only CUDABench evaluation.
+- Uses `bench.cu` as a fixed harness by removing the reference `__global__` kernel and inserting the generated kernel in its place.
+- Prompts with the task spec, required kernel signature, and fixed `main` from `bench.cu`.
+- Reuses CUDABench `gen.py -> executable -> compare.py` validation.
+
+Important behavior:
+
+- Does not replace `scripts/eval.py`; standalone and harness metrics should be interpreted separately.
+- Intended to reduce noise from missing `main`/I/O boilerplate and better isolate CUDA kernel generation ability.
+- If `--output-dir` is omitted, creates a unique timestamped directory under `eval_outputs/`.
+
 ### `scripts/demo.py`
 
 Purpose:
@@ -218,6 +235,7 @@ Each helper should have a clear responsibility.
   scripts/utils.py \
   scripts/train.py \
   scripts/eval.py \
+  scripts/harness_eval.py \
   scripts/demo.py \
   scripts/smoke_test.py
 ```
@@ -227,6 +245,7 @@ Each helper should have a clear responsibility.
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py --help
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/harness_eval.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py --help
 ```
 
@@ -469,7 +488,7 @@ After any meaningful script change, run at least:
 
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python -B -m py_compile \
-  scripts/utils.py scripts/train.py scripts/eval.py scripts/demo.py scripts/smoke_test.py
+  scripts/utils.py scripts/train.py scripts/eval.py scripts/harness_eval.py scripts/demo.py scripts/smoke_test.py
 ```
 
 Then run the relevant entrypoint help or smoke command.
@@ -477,7 +496,8 @@ Then run the relevant entrypoint help or smoke command.
 Examples:
 
 - changed training: run `scripts/train.py --help`
-- changed evaluation: run `scripts/eval.py --help`
+- changed standalone evaluation: run `scripts/eval.py --help`
+- changed harness evaluation: run `scripts/harness_eval.py --help`
 - changed demo path: run `scripts/demo.py --help`
 - changed SCEM core: run `scripts/smoke_test.py`
 
