@@ -152,6 +152,8 @@ Important behavior:
 - Uses region anchors plus random points for next-token training.
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
 - For the current `data/train.json`, `--max-length 4096` covers about 99.6% of records; `--max-length 3072 --skip-overlength` covers about 94.6% without training on truncated records.
+- Larger checkpoint output directories should use `/data/projects/scem/checkpoints/` to avoid filling the user home directory.
+- 4B and 9B LoRA training has been smoke-tested with Accelerate/DDP; current DDP duplicates the full backbone on each GPU, so it improves throughput but does not reduce per-GPU model memory.
 
 ### `scripts/eval.py`
 
@@ -275,36 +277,135 @@ Quick smoke run:
 
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
-  --output-dir /tmp/scem_cudabench_smoke \
+  --output-dir ./eval_outputs/scem_cudabench_smoke \
   --limit 1 \
   --max-new-tokens 4
 ```
 
 ### Training
 
-Recommended first training run:
+SCEM-only 4B, frozen backbone:
 
 ```bash
-/home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py \
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/zhujiace/anaconda3/envs/llama/bin/accelerate launch --num_processes 4 scripts/train.py \
   --train-file data/train.json \
-  --model-path ./models/Qwen3.5-0.8B \
-  --output-dir ./checkpoints/scem_qwen35 \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --output-dir /data/projects/scem/checkpoints/scem_qwen35_4b_scem_only \
   --max-length 4096 \
   --batch-size 1 \
   --grad-accum-steps 16 \
+  --epochs 1 \
   --region-points-per-example 8 \
-  --random-points-per-example 2
+  --random-points-per-example 2 \
+  --mixed-precision bf16 \
+  --model-dtype bfloat16 \
+  --save-steps 100000 \
+  --log-steps 10
+```
+
+SCEM-only 9B, frozen backbone:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/zhujiace/anaconda3/envs/llama/bin/accelerate launch --num_processes 4 scripts/train.py \
+  --train-file data/train.json \
+  --model-path /data/projects/scem/models/Qwen3.5-9B \
+  --output-dir /data/projects/scem/checkpoints/scem_qwen35_9b_scem_only \
+  --max-length 3072 \
+  --skip-overlength \
+  --batch-size 1 \
+  --grad-accum-steps 16 \
+  --epochs 1 \
+  --region-points-per-example 8 \
+  --random-points-per-example 2 \
+  --mixed-precision bf16 \
+  --model-dtype bfloat16 \
+  --save-steps 100000 \
+  --log-steps 10
+```
+
+LoRA + SCEM 4B:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/zhujiace/anaconda3/envs/llama/bin/accelerate launch --num_processes 4 scripts/train.py \
+  --train-file data/train.json \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --output-dir /data/projects/scem/checkpoints/scem_qwen35_4b_lora \
+  --max-length 3072 \
+  --skip-overlength \
+  --batch-size 1 \
+  --grad-accum-steps 16 \
+  --epochs 1 \
+  --region-points-per-example 8 \
+  --random-points-per-example 2 \
+  --use-lora \
+  --lora-r 8 \
+  --lora-alpha 16 \
+  --lora-dropout 0.05 \
+  --gradient-checkpointing \
+  --mixed-precision bf16 \
+  --model-dtype bfloat16 \
+  --save-steps 100000 \
+  --log-steps 10
+```
+
+LoRA + SCEM 9B:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/zhujiace/anaconda3/envs/llama/bin/accelerate launch --num_processes 4 scripts/train.py \
+  --train-file data/train.json \
+  --model-path /data/projects/scem/models/Qwen3.5-9B \
+  --output-dir /data/projects/scem/checkpoints/scem_qwen35_9b_lora \
+  --max-length 3072 \
+  --skip-overlength \
+  --batch-size 1 \
+  --grad-accum-steps 16 \
+  --epochs 1 \
+  --region-points-per-example 8 \
+  --random-points-per-example 2 \
+  --use-lora \
+  --lora-r 8 \
+  --lora-alpha 16 \
+  --lora-dropout 0.05 \
+  --gradient-checkpointing \
+  --mixed-precision bf16 \
+  --model-dtype bfloat16 \
+  --save-steps 100000 \
+  --log-steps 10
+```
+
+For a safer 9B LoRA pilot before a full run, replace the corresponding values above with these smaller settings and add the sample limits:
+
+```bash
+--max-raw-examples 100 \
+--max-training-points 200 \
+--max-length 2048 \
+--lora-r 4 \
+--lora-alpha 8
+```
+
+Verified smoke paths:
+
+```text
+4B SCEM-only single GPU: /data/projects/scem/checkpoints/smoke/scem_qwen35_4b_scem_only_smoke/step-1/scem.pt
+4B SCEM-only two-GPU DDP: /data/projects/scem/checkpoints/smoke/scem_qwen35_4b_scem_only_ddp_smoke/step-1/scem.pt
+9B SCEM-only single GPU: /data/projects/scem/checkpoints/smoke/scem_qwen35_9b_scem_only_smoke/step-1/scem.pt
+9B LoRA two-GPU DDP: /data/projects/scem/checkpoints/smoke/scem_qwen35_9b_lora_ddp_smoke/step-1/scem.pt
 ```
 
 ## Known Experimental Status
 
 Current factual status:
 
-- The project has not yet produced a trained SCEM checkpoint.
+- Smoke training produces valid `scem.pt` checkpoints for 4B and 9B.
 - The only baseline that has been tried so far is `Qwen3.5-0.8B`.
 - That baseline did not solve CUDABench tasks in a usable way.
 - Larger local backbones are now available under `/data/projects/scem/models/`.
 - `Qwen3.5-4B` and `Qwen3.5-9B` are compatible with the current Hugging Face/Qwen integration path.
+- `Qwen3.5-4B` SCEM-only DDP and `Qwen3.5-9B` LoRA DDP smoke tests have completed successfully.
 - SCEM checkpoints are backbone-shape specific; retrain SCEM for 4B or 9B instead of reusing a 0.8B SCEM checkpoint.
 - Therefore, the next session should focus primarily on experiments, not basic infrastructure.
 

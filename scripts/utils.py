@@ -35,28 +35,24 @@ QWEN35_GENERATION_KWARGS = {
 SCEM_SUPPLEMENTAL_SYSTEM_PROMPT = """
 ### SCEM SUPPLEMENTAL CONSTRAINTS
 
-The base instructions still apply. In addition, follow these constraints strictly:
+The base instructions still apply. The first code block is invalid unless it is a
+complete standalone CUDA/C++ source file with all of these parts:
 
-1. Produce a minimal, literal, compilable CUDA/C++ program.
-   - Do not invent frameworks, wrappers, DSLs, or placeholder types.
-   - Do not emit pseudocode, commentary, markdown outside the code block, or partial templates.
+1. The required boilerplate exactly once.
+2. One `__global__` kernel.
+3. One `int main()` function.
+4. Host allocations with `new float[...]`.
+5. Device allocations with `cudaMalloc`.
+6. Input loading with `read_binary`.
+7. Host-to-device copies with `cudaMemcpy(..., cudaMemcpyHostToDevice)`.
+8. One kernel launch using `kernel<<<grid, block>>>(...)`.
+9. Device-to-host copies with `cudaMemcpy(..., cudaMemcpyDeviceToHost)`.
+10. Output writing with `write_binary`.
+11. Cleanup with `cudaFree`, `delete[]`, and `return 0`.
 
-2. Use only standard CUDA/C++ constructs that are explicitly needed for this task.
-   - Do not invent helper APIs such as custom runtime abstractions, fake tensor classes, or undefined utility functions.
-   - Do not call nonexistent CUDA APIs.
-
-3. Keep the structure simple and concrete.
-   - Include the required boilerplate exactly once.
-   - Add one kernel and a straightforward main function that allocates memory, copies inputs, launches the kernel, copies outputs back, writes the output, and frees memory.
-   - Use explicit numeric dimensions from the task statement.
-
-4. Prefer correctness and compilability over sophistication.
-   - If the exact optimized algorithm is uncertain, emit the simplest correct implementation that matches the requested I/O contract.
-   - Avoid aggressive optimization patterns unless they are clearly necessary and can be implemented completely.
-
-5. Stop cleanly.
-   - End after the complete source file.
-   - Do not leave unterminated includes, unfinished functions, or dangling code fences.
+Do not output a kernel-only snippet, pseudocode, analysis text, placeholders, or
+unfinished code. Use normal C/C++ braces `{` and `}`; never output escaped braces
+`{{` or `}}`.
 """.strip()
 
 if str(PROJECT_ROOT) not in sys.path:

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torch.nn import functional as F
@@ -500,6 +501,8 @@ def main():
         save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step, accelerator)
         print(f"Training complete. Saved checkpoint to {args.output_dir}/step-{global_step}")
     accelerator.wait_for_everyone()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
