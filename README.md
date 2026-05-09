@@ -272,18 +272,18 @@ By default, no SCEM checkpoint is loaded. This evaluates the plain Qwen3.5-0.8B 
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path ./models/Qwen3.5-0.8B \
-  --output-dir ./eval_outputs/qwen35_baseline \
   --level level3_prompt \
-  --num-samples 1
+  --num-samples 1 \
+  --run-name baseline
 ```
 
 For a quick smoke test:
 
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
-  --output-dir ./eval_outputs/scem_cudabench_smoke \
   --limit 1 \
-  --max-new-tokens 4
+  --max-new-tokens 4 \
+  --run-name smoke
 ```
 
 To run a first-pass 4B backbone baseline by evaluating one task from each five-task CUDABench group:
@@ -291,11 +291,11 @@ To run a first-pass 4B backbone baseline by evaluating one task from each five-t
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path /data/projects/scem/models/Qwen3.5-4B \
-  --output-dir ./eval_outputs/qwen35_4b_baseline_level1_stride5 \
   --level level1_prompt \
   --task-stride 5 \
   --num-samples 1 \
-  --use-scem-prompt
+  --use-scem-prompt \
+  --run-name firstpass
 ```
 
 ### SCEM Evaluation
@@ -306,10 +306,10 @@ After training, pass a SCEM checkpoint:
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path ./models/Qwen3.5-0.8B \
   --scem-checkpoint ./checkpoints/scem_qwen35/step-1000/scem.pt \
-  --output-dir ./eval_outputs/scem_qwen35_step1000 \
   --level level3_prompt \
   --num-samples 1 \
-  --alpha 0.3
+  --alpha 0.3 \
+  --run-name scem_step1000
 ```
 
 To evaluate the same model with extra SCEM-side system constraints enabled:
@@ -317,11 +317,11 @@ To evaluate the same model with extra SCEM-side system constraints enabled:
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path ./models/Qwen3.5-0.8B \
-  --output-dir ./eval_outputs/qwen35_scem_prompt_limit5 \
   --level level3_prompt \
   --limit 5 \
   --max-new-tokens 128 \
-  --use-scem-prompt
+  --use-scem-prompt \
+  --run-name scem_prompt
 ```
 
 ### Evaluation Outputs
@@ -334,6 +334,14 @@ eval_results.jsonl        per-task compile/functionality booleans
 summary.json              aggregate metrics
 temp_eval/                temporary compile/run directories, only kept with --keep-temp
 ```
+
+If `--output-dir` is omitted, `scripts/eval.py` creates a unique directory under `eval_outputs/` using the model name, prompt level, enabled modes, task subset, optional `--run-name`, and a timestamp. Example:
+
+```text
+eval_outputs/Qwen3.5-4B_level1_baseline_scemprompt_stride5_firstpass_20260509_143012/
+```
+
+Pass `--output-dir` only when you intentionally want to use a fixed directory. Fixed directories can resume generation by skipping existing task ids, but repeated experiments may overwrite `eval_results.jsonl` and `summary.json`.
 
 In `eval_results.jsonl`, compile/functionality fields plus run metadata such as `level`, `model_path`, and `scem_checkpoint` are written before long fields such as `prompt`, `code*`, and `response*` so results remain easy to inspect in IDEs.
 

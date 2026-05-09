@@ -167,6 +167,8 @@ Important behavior:
 
 - Default mode is backbone-only baseline if `--scem-checkpoint` is omitted.
 - Uses CUDABench prompt format from the submodule.
+- If `--output-dir` is omitted, creates a unique directory under `eval_outputs/` using model name, level, mode flags, optional `--run-name`, and timestamp.
+- Use `--output-dir` only when intentionally writing to a fixed directory.
 - Writes:
   - `generated_results.jsonl`
   - `eval_results.jsonl`
@@ -268,18 +270,18 @@ Compile / functionality spot-check:
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
   --model-path ./models/Qwen3.5-0.8B \
-  --output-dir ./eval_outputs/qwen35_baseline \
   --level level3_prompt \
-  --num-samples 1
+  --num-samples 1 \
+  --run-name baseline
 ```
 
 Quick smoke run:
 
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py \
-  --output-dir ./eval_outputs/scem_cudabench_smoke \
   --limit 1 \
-  --max-new-tokens 4
+  --max-new-tokens 4 \
+  --run-name smoke
 ```
 
 ### Training

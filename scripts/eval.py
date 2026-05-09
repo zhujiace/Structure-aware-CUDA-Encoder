@@ -1,8 +1,10 @@
 import argparse
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List
+from datetime import datetime
 
 from utils import (
     DEFAULT_CUDABENCH_ROOT,
@@ -31,7 +33,15 @@ def parse_args():
     parser.add_argument("--model-path", default="./models/Qwen3.5-0.8B")
     parser.add_argument("--scem-checkpoint", default=None, help="Optional path to scem.pt. Omit for backbone baseline.")
     parser.add_argument("--lora-checkpoint", default=None, help="Optional path to a PEFT/LoRA adapter directory.")
-    parser.add_argument("--output-dir", default="./eval_outputs/cudabench_qwen35_baseline")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help=(
+            "Evaluation output directory. If omitted, a unique directory is created under "
+            "./eval_outputs using model, level, mode, and timestamp."
+        ),
+    )
+    parser.add_argument("--run-name", default=None, help="Optional label included in the auto-generated output directory name.")
     parser.add_argument("--level", choices=["level1_prompt", "level2_prompt", "level3_prompt"], default="level3_prompt")
     parser.add_argument("--gpu-model", default="NVIDIA GeForce RTX 4090")
     parser.add_argument("--max-new-tokens", type=int, default=32768)
@@ -54,6 +64,46 @@ def parse_args():
     parser.add_argument("--trust-generated", action="store_true", help="Skip generation and evaluate existing results.jsonl.")
     parser.add_argument("--results-jsonl", default=None, help="Existing generated results JSONL for --trust-generated.")
     return parser.parse_args()
+
+
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    slug = slug.strip("._-")
+    return slug or "run"
+
+
+def checkpoint_label(path: str | None) -> str:
+    if not path:
+        return ""
+    p = Path(path)
+    if p.name == "scem.pt" and p.parent.name:
+        return p.parent.name
+    return p.name or p.parent.name
+
+
+def build_auto_output_dir(args) -> Path:
+    model_label = slugify(Path(args.model_path).name)
+    level_label = args.level.replace("_prompt", "")
+    mode_parts = ["baseline"]
+    if args.use_scem_prompt:
+        mode_parts.append("scemprompt")
+    if args.scem_checkpoint:
+        mode_parts.append("scem")
+        mode_parts.append(slugify(checkpoint_label(args.scem_checkpoint)))
+    if args.lora_checkpoint:
+        mode_parts.append("lora")
+        mode_parts.append(slugify(checkpoint_label(args.lora_checkpoint)))
+    if args.task_stride != 1:
+        mode_parts.append(f"stride{args.task_stride}")
+    if args.limit is not None:
+        mode_parts.append(f"limit{args.limit}")
+    if args.num_samples != 1:
+        mode_parts.append(f"n{args.num_samples}")
+    if args.run_name:
+        mode_parts.append(slugify(args.run_name))
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = "_".join([model_label, level_label, *mode_parts, timestamp])
+    return Path("eval_outputs") / name
 
 
 def select_eval_tasks(tasks: List[Dict[str, Any]], stride: int, limit: int | None) -> List[Dict[str, Any]]:
@@ -215,6 +265,7 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
     summary = {
         "total_tasks": total_tasks,
         "total_versions": total_versions,
+        "output_dir": str(eval_path.parent),
         "level": args.level,
         "model_path": args.model_path,
         "scem_checkpoint": args.scem_checkpoint,
@@ -252,7 +303,8 @@ def main():
         limit=args.limit,
     )
     tasks_by_id = {int(task["id"]): task for task in tasks}
-    output_dir = Path(args.output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else build_auto_output_dir(args)
+    args.output_dir = str(output_dir)
     results_path = Path(args.results_jsonl) if args.results_jsonl else output_dir / "generated_results.jsonl"
     eval_path = output_dir / "eval_results.jsonl"
 
