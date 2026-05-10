@@ -29,6 +29,18 @@ from utils import (
 )
 
 
+HARNESS_SYSTEM_PROMPT = """
+You are generating CUDA kernel code for a fixed CUDABench harness.
+
+Output exactly one fenced cpp code block. The code block must contain the
+replacement `__global__` kernel with the requested kernel name and compatible
+parameters. You may include small `__device__` helper functions if needed.
+
+Do not output explanations, analysis, placeholders, `main`, host I/O, includes,
+memory allocation, cudaMemcpy calls, or kernel launch code.
+""".strip()
+
+
 @dataclass(frozen=True)
 class HarnessParts:
     prefix: str
@@ -177,19 +189,25 @@ def format_io_spec(items: List[Dict[str, Any]]) -> str:
     return "\n".join(f"- {item['name']}: {item['dtype']}, shape = {item['shape']}" for item in items)
 
 
+def kernel_name_from_signature(signature: str) -> str:
+    match = re.search(r"\bvoid\s+([A-Za-z_]\w*)\s*\(", signature)
+    if match is None:
+        raise ValueError(f"Unable to extract kernel name from signature: {signature}")
+    return match.group(1)
+
+
 def build_harness_prompt(task: Dict[str, Any], level: str, gpu_model: str) -> str:
     parts = extract_harness_parts(task["bench.cu"])
+    kernel_name = kernel_name_from_signature(parts.kernel_signature)
     return f"""
-### HARNESS KERNEL COMPLETION TASK
+Task: write only the CUDA kernel for a fixed test harness.
 
-You are given a fixed CUDA harness from CUDABench. The evaluator will compile the
-fixed harness with your generated kernel inserted where the reference kernel was
-removed.
+The evaluator will insert your generated code into the existing harness where
+the reference kernel was removed. The harness already contains headers, helper
+functions, input/output file handling, memory allocation, cudaMemcpy calls,
+kernel launch, and main().
 
-Output ONLY one ```cpp code block containing the replacement `__global__` kernel.
-You may include small `__device__` helper functions if needed.
-Do NOT output `main`, `read_binary`, `write_binary`, include directives, host I/O,
-host memory allocation, or kernel launch code.
+Your output must be exactly one cpp code block containing `{kernel_name}`.
 
 Task Name:
 {task['task_name']}
@@ -206,18 +224,38 @@ Output:
 GPU:
 {gpu_model}
 
-Required kernel signature. Use this exact kernel name and compatible parameters:
-```cpp
-{parts.kernel_signature};
-```
+Required kernel signature:
+{parts.kernel_signature}
 
-Fixed main function supplied by the harness. Do not regenerate or modify it:
-```cpp
+Fixed main function supplied by the harness. Do not regenerate it:
+BEGIN_FIXED_MAIN
 {parts.main_function}
-```
+END_FIXED_MAIN
 
-Your answer must contain only the replacement kernel code block.
+Return only the replacement `__global__` kernel code block. Optional `__device__`
+helpers may appear before the kernel in the same code block.
 """.strip()
+
+
+def extract_harness_kernel(response: str, kernel_name: str) -> Tuple[str, List[str]]:
+    code = extract_code(
+        response,
+        required_substrings=["__global__", kernel_name],
+        preferred_substrings=[kernel_name, "__global__"],
+        forbidden_substrings=["int main", "#include", "cudaMalloc", "cudaMemcpy", "read_binary", "write_binary"],
+        fallback_to_best=False,
+    )
+    errors: List[str] = []
+    if not code:
+        errors.append("missing_required_kernel_block")
+        return "", errors
+    if "__global__" not in code:
+        errors.append("missing_global")
+    if kernel_name not in code:
+        errors.append("missing_required_kernel_name")
+    if "int main" in code:
+        errors.append("contains_main")
+    return code, errors
 
 
 def select_eval_tasks(tasks: List[Dict[str, Any]], stride: int, limit: Optional[int]) -> List[Dict[str, Any]]:
@@ -233,7 +271,7 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
     generator = LocalGenerator(
         model_path=args.model_path,
         max_new_tokens=args.max_new_tokens,
-        system_prompt=helpers.system_prompt,
+        system_prompt=HARNESS_SYSTEM_PROMPT,
         use_scem_prompt=False,
         enable_scem=bool(args.scem_checkpoint),
         scem_checkpoint=args.scem_checkpoint,
@@ -265,11 +303,13 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
                 "eval_mode": "harness_kernel_only",
             }
             print(f"[GEN {index}/{len(tasks)}] id={task_id} {task['task_name']}")
+            kernel_name = kernel_name_from_signature(parts.kernel_signature)
             for sample_idx in range(1, args.num_samples + 1):
                 response = generator.generate(prompt)
-                code = extract_code(response)
+                code, extraction_errors = extract_harness_kernel(response, kernel_name)
                 record[f"response{sample_idx}"] = response
                 record[f"code{sample_idx}"] = code
+                record[f"extraction_errors{sample_idx}"] = extraction_errors
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
             handle.flush()
 
@@ -369,10 +409,13 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
             for sample_idx in range(1, args.num_samples + 1):
                 code_key = f"code{sample_idx}"
                 response_key = f"response{sample_idx}"
+                extraction_key = f"extraction_errors{sample_idx}"
                 if code_key in record:
                     output[code_key] = record.get(code_key)
                 if response_key in record:
                     output[response_key] = record.get(response_key)
+                if extraction_key in record:
+                    output[extraction_key] = record.get(extraction_key)
 
             if task_has_compile:
                 task_compile_pass += 1

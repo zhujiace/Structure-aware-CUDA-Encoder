@@ -380,10 +380,12 @@ If CUDABench is stored somewhere else, pass:
 It uses each CUDABench record's `bench.cu` as a fixed harness:
 
 - removes the reference `__global__` kernel from `bench.cu`
+- uses a harness-specific system/user prompt instead of the CUDABench generation prompt
 - prompts the model with the task spec, required kernel signature, and fixed `main`
 - asks the model to output only the replacement `__global__` kernel and optional `__device__` helpers
 - inserts the generated kernel back into the fixed harness
 - compiles and runs the same `gen.py -> executable -> compare.py` validation
+- extracts the generated code by preferring code blocks that contain `__global__` and the required kernel name, so explanatory snippets are not compiled as kernels
 
 This should be interpreted separately from standalone `eval.py`: harness evaluation reduces noise from missing `main`/I/O boilerplate and focuses more directly on kernel logic, indexing, guards, synchronization, and write-back behavior.
 

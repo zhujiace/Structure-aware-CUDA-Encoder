@@ -187,7 +187,9 @@ Purpose:
 
 - Kernel-only CUDABench evaluation.
 - Uses `bench.cu` as a fixed harness by removing the reference `__global__` kernel and inserting the generated kernel in its place.
+- Uses harness-specific prompts, not the external CUDABench generation prompt.
 - Prompts with the task spec, required kernel signature, and fixed `main` from `bench.cu`.
+- Extracts code by requiring a code block with `__global__` and the required kernel name when possible.
 - Reuses CUDABench `gen.py -> executable -> compare.py` validation.
 
 Important behavior:

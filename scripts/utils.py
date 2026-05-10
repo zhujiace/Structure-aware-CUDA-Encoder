@@ -9,7 +9,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import torch
 from transformers import (
@@ -224,11 +224,53 @@ def build_cuda_prompt(
     )
 
 
-def extract_code(response: str) -> str:
-    matches = re.findall(r"```(?:\w+)?\s*([\s\S]*?)```", response or "")
-    if matches:
-        return matches[0].strip()
-    return (response or "").strip()
+def extract_code(
+    response: str,
+    required_substrings: Optional[Sequence[str]] = None,
+    preferred_substrings: Optional[Sequence[str]] = None,
+    forbidden_substrings: Optional[Sequence[str]] = None,
+    fallback_to_best: bool = True,
+) -> str:
+    """Extract the most plausible code block from a model response.
+
+    By default this is still a general CUDA-oriented extractor for standalone
+    eval/demo. Callers such as harness_eval can pass required substrings to avoid
+    compiling explanatory snippets or unrelated code blocks.
+    """
+    text = response or ""
+    blocks = [match.strip() for match in re.findall(r"```(?:\w+)?\s*([\s\S]*?)```", text)]
+    required = list(required_substrings or [])
+    preferred = list(
+        preferred_substrings
+        or ["__global__", "int main", "cudaMalloc", "cudaMemcpy", "write_binary"]
+    )
+    forbidden = list(forbidden_substrings or [])
+
+    def score(block: str) -> Tuple[int, int]:
+        if required and not all(item in block for item in required):
+            return (-10_000, len(block))
+        value = 0
+        value += 10 * sum(item in block for item in preferred)
+        value -= 10 * sum(item in block for item in forbidden)
+        if "__global__" in block:
+            value += 5
+        if len(block.strip()) < 100:
+            value -= 5
+        return (value, len(block))
+
+    if blocks:
+        candidates = blocks
+        if required:
+            candidates = [block for block in blocks if all(item in block for item in required)]
+            if not candidates and not fallback_to_best:
+                return ""
+        candidates = candidates or blocks
+        return max(candidates, key=score).strip()
+
+    stripped = text.strip()
+    if required and not all(item in stripped for item in required) and not fallback_to_best:
+        return ""
+    return stripped
 
 
 def load_scem_checkpoint(path: str, model_config, device: str, dtype: torch.dtype) -> SCEModule:
