@@ -76,11 +76,19 @@ class CUDABenchHelpers:
 
 
 class FirstCodeBlockStoppingCriteria(StoppingCriteria):
-    """Stop generation once the first fenced code block is fully closed."""
+    """Stop generation once a matching fenced code block is fully closed."""
 
-    def __init__(self, tokenizer, prompt_length: int):
+    def __init__(
+        self,
+        tokenizer,
+        prompt_length: int,
+        required_substrings: Optional[Sequence[str]] = None,
+        forbidden_substrings: Optional[Sequence[str]] = None,
+    ):
         self.tokenizer = tokenizer
         self.prompt_length = prompt_length
+        self.required_substrings = list(required_substrings or [])
+        self.forbidden_substrings = list(forbidden_substrings or [])
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor, **kwargs) -> bool:
         if input_ids.shape[0] != 1:
@@ -89,11 +97,16 @@ class FirstCodeBlockStoppingCriteria(StoppingCriteria):
         if generated_ids.numel() == 0:
             return False
         text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
-        start = text.find("```")
-        if start < 0:
+        matches = re.findall(r"```(?:\w+)?\s*([\s\S]*?)```", text)
+        if not matches:
             return False
-        end = text.find("```", start + 3)
-        return end >= 0
+        for block in matches:
+            if self.required_substrings and not all(item in block for item in self.required_substrings):
+                continue
+            if self.forbidden_substrings and any(item in block for item in self.forbidden_substrings):
+                continue
+            return True
+        return False
 
 
 def resolve_cudabench_paths(
@@ -351,7 +364,12 @@ class LocalGenerator:
                 ]
             )
 
-    def generate(self, prompt: str) -> str:
+    def generate(
+        self,
+        prompt: str,
+        stop_required_substrings: Optional[Sequence[str]] = None,
+        stop_forbidden_substrings: Optional[Sequence[str]] = None,
+    ) -> str:
         messages = [
             {"role": "system", "content": self.system_prompt},
             {"role": "user", "content": prompt},
@@ -365,7 +383,14 @@ class LocalGenerator:
         generation_kwargs = dict(QWEN35_GENERATION_KWARGS)
         generation_kwargs["max_new_tokens"] = self.max_new_tokens
         generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
-            [FirstCodeBlockStoppingCriteria(self.tokenizer, inputs["input_ids"].shape[-1])]
+            [
+                FirstCodeBlockStoppingCriteria(
+                    self.tokenizer,
+                    inputs["input_ids"].shape[-1],
+                    required_substrings=stop_required_substrings,
+                    forbidden_substrings=stop_forbidden_substrings,
+                )
+            ]
         )
         if self.logits_processor is not None:
             generation_kwargs["logits_processor"] = self.logits_processor

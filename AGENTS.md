@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file is for future coding agents working in this repository. It captures the current stable project state as of 2026-04-26 and is intended to make the next session pick up quickly without rediscovering local conventions.
+This file is for future coding agents working in this repository. It captures the current stable project state as of 2026-05-11 and is intended to make the next session pick up quickly without rediscovering local conventions.
 
 ## Scope
 
@@ -13,9 +13,10 @@ Current stage:
 - Training script is in place.
 - Inference / demo script is in place.
 - CUDABench evaluation script is in place.
+- Kernel-only harness evaluation script is in place.
 - Training data and benchmark are available locally.
-- No real SCEM training run has been completed yet.
-- One baseline experiment was run with `Qwen3.5-0.8B`, and the result was effectively unusable for CUDABench generation. This should be treated as the first baseline observation, not as a bug in the evaluation pipeline.
+- SCEM smoke training has produced valid `scem.pt` checkpoints for 4B/9B paths, but no full production SCEM experiment has been completed yet.
+- Baseline experiments have been run for `Qwen3.5-0.8B` and `Qwen3.5-4B`; the 0.8B result is effectively unusable, while 4B has measurable but still low CUDA generation accuracy.
 
 ## Repository Structure
 
@@ -169,7 +170,7 @@ Important behavior:
 
 - Default mode is backbone-only baseline if `--scem-checkpoint` is omitted.
 - Uses CUDABench prompt format from the submodule.
-- If `--output-dir` is omitted, creates a unique directory under `eval_outputs/` using model name, level, mode flags, optional `--run-name`, and timestamp.
+- If `--output-dir` is omitted, creates a unique directory under `eval_outputs/<model-name>/` using level, mode flags, optional `--run-name`, and short date such as `260511`; same-day duplicates get `_02`, `_03`, ... suffixes.
 - Use `--output-dir` only when intentionally writing to a fixed directory.
 - Writes:
   - `generated_results.jsonl`
@@ -190,13 +191,14 @@ Purpose:
 - Uses harness-specific prompts, not the external CUDABench generation prompt.
 - Prompts with the task spec, required kernel signature, and fixed `main` from `bench.cu`.
 - Extracts code by requiring a code block with `__global__` and the required kernel name when possible.
+- Uses the shared configurable code-block stopping criterion with required substrings; standalone `eval.py` keeps the default stopping behavior.
 - Reuses CUDABench `gen.py -> executable -> compare.py` validation.
 
 Important behavior:
 
 - Does not replace `scripts/eval.py`; standalone and harness metrics should be interpreted separately.
 - Intended to reduce noise from missing `main`/I/O boilerplate and better isolate CUDA kernel generation ability.
-- If `--output-dir` is omitted, creates a unique timestamped directory under `eval_outputs/`.
+- If `--output-dir` is omitted, creates a unique dated directory under `eval_outputs/<model-name>/`; same-day duplicates get `_02`, `_03`, ... suffixes.
 
 ### `scripts/demo.py`
 
@@ -424,21 +426,62 @@ Verified smoke paths:
 Current factual status:
 
 - Smoke training produces valid `scem.pt` checkpoints for 4B and 9B.
-- The only baseline that has been tried so far is `Qwen3.5-0.8B`.
-- That baseline did not solve CUDABench tasks in a usable way.
+- Baselines have been tried for `Qwen3.5-0.8B` and `Qwen3.5-4B`.
+- The 0.8B baseline did not solve CUDABench tasks in a usable way.
+- The best current 4B baseline is kernel-only harness eval at compile 0.26 and functionality 0.19 on `level1_prompt`, `task_stride=5`, before rerunning with the latest stopping changes.
 - Larger local backbones are now available under `/data/projects/scem/models/`.
 - `Qwen3.5-4B` and `Qwen3.5-9B` are compatible with the current Hugging Face/Qwen integration path.
 - `Qwen3.5-4B` SCEM-only DDP and `Qwen3.5-9B` LoRA DDP smoke tests have completed successfully.
 - SCEM checkpoints are backbone-shape specific; retrain SCEM for 4B or 9B instead of reusing a 0.8B SCEM checkpoint.
 - Therefore, the next session should focus primarily on experiments, not basic infrastructure.
 
+Latest evaluation results currently present under `eval_outputs/`:
+
+| Directory | Model | Mode | Level | Tasks | Compile | Functionality | Notes |
+| --- | --- | --- | --- | ---: | ---: | ---: | --- |
+| `eval_outputs/qwen35_baseline` | `Qwen3.5-0.8B` | standalone | `level1_prompt` | 500 | 0.00 | 0.00 | 0.8B baseline, effectively unusable |
+| `eval_outputs/qwen35_4b_baseline_stride5` | `Qwen3.5-4B` | standalone | `level3_prompt` | 100 | 0.09 | 0.03 | older level3 stride-5 baseline |
+| `eval_outputs/qwen35_4b_baseline_level1_stride5` | `Qwen3.5-4B` | standalone | `level1_prompt` | 100 | 0.09 | 0.05 | 4B level1 baseline |
+| `eval_outputs/Qwen3.5-4B_level1_baseline_scemprompt_stride5_20260509_123436` | `Qwen3.5-4B` | standalone + SCEM prompt only | `level1_prompt` | 100 | 0.14 | 0.06 | no SCEM checkpoint loaded |
+| `eval_outputs/Qwen3.5-4B_level1_harness_stride5_20260509_170036` | `Qwen3.5-4B` | harness kernel-only | `level1_prompt` | 100 | 0.15 | 0.08 | older harness baseline |
+| `eval_outputs/Qwen3.5-4B_level1_harness_stride5_20260510_223512` | `Qwen3.5-4B` | harness kernel-only | `level1_prompt` | 100 | 0.26 | 0.19 | best current baseline before rerunning with latest stopping changes |
+
+Do not treat `eval_outputs/Qwen3.5-4B_level1_baseline_stride5_limit1_auto_dir_check_20260509_122809` as a valid experiment. It was an output-directory/checking artifact: `generated_results.jsonl` is empty, `limit=1`, but `eval_results.jsonl` has 100 lines and points at another generated-results file.
+
+Recent code/output changes to remember:
+
+- `scripts/eval.py` and `scripts/harness_eval.py` now auto-create output directories under `eval_outputs/<model-name>/`.
+- Auto directory names use a short date like `260511`, not a full timestamp. Same-day duplicates get `_02`, `_03`, ... suffixes.
+- `scripts/utils.py` has a configurable first-code-block stopping criterion. Harness eval passes required substrings such as `__global__` and the kernel name, while standalone `eval.py` keeps the default first-complete-code-block behavior.
+- `scripts/harness_eval.py` prompts for exactly one fenced cpp block containing the replacement `__global__` kernel and any needed helpers in the same block. It should not ask the model to generate `main`.
+
+Recommended next command if the user asks to rerun the latest 4B harness baseline:
+
+```bash
+cd /home/zhujiace/project/Kernel/SCEM
+
+CUDA_VISIBLE_DEVICES=0 \
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/harness_eval.py \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --level level1_prompt \
+  --task-stride 5 \
+  --num-samples 1 \
+  --run-name baseline
+```
+
+Expected output directory shape:
+
+```text
+eval_outputs/Qwen3.5-4B/level1_harness_stride5_baseline_260511/
+```
+
 This means the next likely tasks are:
 
 1. run and debug training
 2. verify checkpoint loading
-3. rerun evaluation with trained SCEM
-4. compare against the 0.8B backbone baseline
-5. possibly move to a larger backbone if 0.8B remains too weak
+3. rerun the 4B harness baseline after the latest stopping/prompt changes
+4. rerun evaluation with trained SCEM
+5. compare trained SCEM against the 4B standalone and harness baselines
 
 ## Known Design Decisions
 

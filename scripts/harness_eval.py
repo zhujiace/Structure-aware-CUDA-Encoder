@@ -32,12 +32,13 @@ from utils import (
 HARNESS_SYSTEM_PROMPT = """
 You are generating CUDA kernel code for a fixed CUDABench harness.
 
-Output exactly one fenced cpp code block. The code block must contain the
-replacement `__global__` kernel with the requested kernel name and compatible
-parameters. You may include small `__device__` helper functions if needed.
+Output exactly one fenced cpp code block and nothing else. The single code block
+must contain the replacement `__global__` kernel with the requested kernel name
+and compatible parameters. If helper functions are needed, put all helpers before
+the kernel in the same code block.
 
 Do not output explanations, analysis, placeholders, `main`, host I/O, includes,
-memory allocation, cudaMemcpy calls, or kernel launch code.
+memory allocation, cudaMemcpy calls, kernel launch code, or multiple code blocks.
 """.strip()
 
 
@@ -59,7 +60,7 @@ def parse_args():
     parser.add_argument("--model-path", default="./models/Qwen3.5-0.8B")
     parser.add_argument("--scem-checkpoint", default=None, help="Optional path to scem.pt for decoding-time SCEM bias.")
     parser.add_argument("--lora-checkpoint", default=None, help="Optional path to a PEFT/LoRA adapter directory.")
-    parser.add_argument("--output-dir", default=None, help="Output directory. If omitted, create a unique eval_outputs/ harness directory.")
+    parser.add_argument("--output-dir", default=None, help="Output directory. If omitted, create a unique dated eval_outputs/ harness directory.")
     parser.add_argument("--run-name", default=None, help="Optional label included in the auto-generated output directory name.")
     parser.add_argument("--level", choices=["level1_prompt", "level2_prompt", "level3_prompt"], default="level1_prompt")
     parser.add_argument("--gpu-model", default="NVIDIA GeForce RTX 4090")
@@ -99,6 +100,16 @@ def checkpoint_label(path: Optional[str]) -> str:
     return p.name or p.parent.name
 
 
+def uniquify_output_dir(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{path.name}_{index:02d}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Cannot find a free output directory based on {path}")
+
+
 def build_auto_output_dir(args) -> Path:
     model_label = slugify(Path(args.model_path).name)
     level_label = args.level.replace("_prompt", "")
@@ -114,9 +125,12 @@ def build_auto_output_dir(args) -> Path:
     if args.num_samples != 1:
         mode_parts.append(f"n{args.num_samples}")
     if args.run_name:
-        mode_parts.append(slugify(args.run_name))
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return Path("eval_outputs") / "_".join([model_label, level_label, *mode_parts, timestamp])
+        run_label = slugify(args.run_name)
+        if run_label not in mode_parts:
+            mode_parts.append(run_label)
+    date_label = datetime.now().strftime("%y%m%d")
+    name = "_".join([level_label, *mode_parts, date_label])
+    return uniquify_output_dir(Path("eval_outputs") / model_label / name)
 
 
 def find_matching_brace(text: str, open_index: int) -> int:
@@ -208,6 +222,8 @@ functions, input/output file handling, memory allocation, cudaMemcpy calls,
 kernel launch, and main().
 
 Your output must be exactly one cpp code block containing `{kernel_name}`.
+If you need helper functions, put every helper and the kernel in that same code
+block. Do not split helpers and kernel across multiple code blocks.
 
 Task Name:
 {task['task_name']}
@@ -232,8 +248,8 @@ BEGIN_FIXED_MAIN
 {parts.main_function}
 END_FIXED_MAIN
 
-Return only the replacement `__global__` kernel code block. Optional `__device__`
-helpers may appear before the kernel in the same code block.
+Return only one code block. Optional `__device__` helpers must appear before the
+replacement `__global__` kernel in the same code block.
 """.strip()
 
 
@@ -305,7 +321,18 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
             print(f"[GEN {index}/{len(tasks)}] id={task_id} {task['task_name']}")
             kernel_name = kernel_name_from_signature(parts.kernel_signature)
             for sample_idx in range(1, args.num_samples + 1):
-                response = generator.generate(prompt)
+                response = generator.generate(
+                    prompt,
+                    stop_required_substrings=["__global__", kernel_name],
+                    stop_forbidden_substrings=[
+                        "int main",
+                        "#include",
+                        "cudaMalloc",
+                        "cudaMemcpy",
+                        "read_binary",
+                        "write_binary",
+                    ],
+                )
                 code, extraction_errors = extract_harness_kernel(response, kernel_name)
                 record[f"response{sample_idx}"] = response
                 record[f"code{sample_idx}"] = code

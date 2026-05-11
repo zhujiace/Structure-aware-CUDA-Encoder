@@ -336,10 +336,10 @@ summary.json              aggregate metrics
 temp_eval/                temporary compile/run directories, only kept with --keep-temp
 ```
 
-If `--output-dir` is omitted, `scripts/eval.py` creates a unique directory under `eval_outputs/` using the model name, prompt level, enabled modes, task subset, optional `--run-name`, and a timestamp. Example:
+If `--output-dir` is omitted, `scripts/eval.py` creates a unique directory under `eval_outputs/<model-name>/` using the prompt level, enabled modes, task subset, optional `--run-name`, and a short date. If the same directory already exists, `_02`, `_03`, ... is appended automatically. Example:
 
 ```text
-eval_outputs/Qwen3.5-4B_level1_baseline_scemprompt_stride5_firstpass_20260509_143012/
+eval_outputs/Qwen3.5-4B/level1_baseline_scemprompt_stride5_firstpass_260511/
 ```
 
 Pass `--output-dir` only when you intentionally want to use a fixed directory. Fixed directories can resume generation by skipping existing task ids, but repeated experiments may overwrite `eval_results.jsonl` and `summary.json`.
@@ -386,6 +386,7 @@ It uses each CUDABench record's `bench.cu` as a fixed harness:
 - inserts the generated kernel back into the fixed harness
 - compiles and runs the same `gen.py -> executable -> compare.py` validation
 - extracts the generated code by preferring code blocks that contain `__global__` and the required kernel name, so explanatory snippets are not compiled as kernels
+- uses the shared configurable code-block stopping criterion to stop only after a matching kernel block; standalone `eval.py` keeps the default first-complete-code-block behavior
 
 This should be interpreted separately from standalone `eval.py`: harness evaluation reduces noise from missing `main`/I/O boilerplate and focuses more directly on kernel logic, indexing, guards, synchronization, and write-back behavior.
 
@@ -400,7 +401,7 @@ Example 4B harness baseline:
   --run-name qwen35_4b_harness_level1_stride5
 ```
 
-If `--output-dir` is omitted, it creates a unique timestamped directory under `eval_outputs/`, similar to `scripts/eval.py`.
+If `--output-dir` is omitted, it creates a unique dated directory under `eval_outputs/<model-name>/`, similar to `scripts/eval.py`.
 
 ## Training
 

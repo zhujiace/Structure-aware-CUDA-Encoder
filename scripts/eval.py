@@ -38,7 +38,7 @@ def parse_args():
         default=None,
         help=(
             "Evaluation output directory. If omitted, a unique directory is created under "
-            "./eval_outputs using model, level, mode, and timestamp."
+            "./eval_outputs using model, level, mode, and date."
         ),
     )
     parser.add_argument("--run-name", default=None, help="Optional label included in the auto-generated output directory name.")
@@ -81,6 +81,16 @@ def checkpoint_label(path: str | None) -> str:
     return p.name or p.parent.name
 
 
+def uniquify_output_dir(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{path.name}_{index:02d}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Cannot find a free output directory based on {path}")
+
+
 def build_auto_output_dir(args) -> Path:
     model_label = slugify(Path(args.model_path).name)
     level_label = args.level.replace("_prompt", "")
@@ -100,10 +110,12 @@ def build_auto_output_dir(args) -> Path:
     if args.num_samples != 1:
         mode_parts.append(f"n{args.num_samples}")
     if args.run_name:
-        mode_parts.append(slugify(args.run_name))
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = "_".join([model_label, level_label, *mode_parts, timestamp])
-    return Path("eval_outputs") / name
+        run_label = slugify(args.run_name)
+        if run_label not in mode_parts:
+            mode_parts.append(run_label)
+    date_label = datetime.now().strftime("%y%m%d")
+    name = "_".join([level_label, *mode_parts, date_label])
+    return uniquify_output_dir(Path("eval_outputs") / model_label / name)
 
 
 def select_eval_tasks(tasks: List[Dict[str, Any]], stride: int, limit: int | None) -> List[Dict[str, Any]]:
