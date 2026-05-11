@@ -292,7 +292,18 @@ def load_scem_checkpoint(path: str, model_config, device: str, dtype: torch.dtyp
     if not isinstance(config, SCEMConfig):
         config = SCEMConfig.from_lm_config(model_config)
     scem = SCEModule(config)
-    scem.load_state_dict(checkpoint["state_dict"])
+    state_dict = checkpoint["state_dict"]
+    deprecated_keys = [
+        key
+        for key in state_dict
+        if key.startswith("state_encoder.task_family") or key.startswith("state_encoder.tensor_rank")
+    ]
+    if deprecated_keys:
+        raise ValueError(
+            "This SCEM checkpoint uses the old task-family/tensor-rank state layout. "
+            "Retrain SCEM with the current prefix-only CUDA state extractor."
+        )
+    scem.load_state_dict(state_dict)
     scem.to(device=device, dtype=dtype)
     scem.eval()
     return scem
@@ -319,8 +330,6 @@ class LocalGenerator:
         scem_checkpoint: Optional[str] = None,
         lora_checkpoint: Optional[str] = None,
         alpha: float = 0.3,
-        task_family: str = "unknown",
-        tensor_rank: int = 0,
     ):
         self.max_new_tokens = max_new_tokens
         self.system_prompt = compose_system_prompt(system_prompt, use_scem_prompt=use_scem_prompt)
@@ -347,10 +356,7 @@ class LocalGenerator:
                 scem.eval()
             state_provider = TokenizerCudaStateProvider(
                 tokenizer=self.tokenizer,
-                extractor=CudaProgramStateExtractor(
-                    task_family=task_family,
-                    tensor_rank=tensor_rank,
-                ),
+                extractor=CudaProgramStateExtractor(),
             )
             attach_scem_hidden_state_capture(self.model)
             self.logits_processor = LogitsProcessorList(

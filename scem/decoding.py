@@ -55,7 +55,7 @@ def make_static_state_provider(states: Sequence) -> StateProvider:
     batch = CudaProgramStateBatch.from_states(states)
 
     def provider(input_ids: torch.LongTensor) -> CudaProgramStateBatch:
-        if input_ids.shape[0] != batch.task_family.shape[0]:
+        if input_ids.shape[0] != batch.program_region.shape[0]:
             raise ValueError("input_ids batch size does not match the fixed SCEM state batch")
         return batch
 

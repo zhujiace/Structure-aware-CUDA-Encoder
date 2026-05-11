@@ -33,6 +33,14 @@ def parse_args():
     parser.add_argument("--skip-overlength", action="store_true", help="Skip examples longer than --max-length instead of truncating them.")
     parser.add_argument("--max-raw-examples", type=int, default=None, help="Read at most this many raw records; useful for smoke tests.")
     parser.add_argument("--max-training-points", type=int, default=None, help="Keep at most this many expanded training points; useful for smoke tests.")
+    parser.add_argument(
+        "--val-ratio",
+        "--var-ratio",
+        dest="val_ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of raw records reserved for validation. --var-ratio is accepted as a compatibility alias.",
+    )
     parser.add_argument("--region-points-per-example", type=int, default=8)
     parser.add_argument("--random-points-per-example", type=int, default=2)
     parser.add_argument("--batch-size", type=int, default=2)
@@ -43,8 +51,6 @@ def parse_args():
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--bias-rank", type=int, default=64)
-    parser.add_argument("--task-family", default="elementwise")
-    parser.add_argument("--tensor-rank", type=int, default=1)
     parser.add_argument("--save-steps", type=int, default=500)
     parser.add_argument("--log-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
@@ -83,7 +89,7 @@ class PrefixNextTokenDataset(Dataset):
 
     def __init__(
         self,
-        path: str,
+        path: Optional[str],
         tokenizer,
         max_length: int,
         min_prefix_length: int,
@@ -92,6 +98,8 @@ class PrefixNextTokenDataset(Dataset):
         skip_overlength: bool = False,
         max_raw_examples: Optional[int] = None,
         max_training_points: Optional[int] = None,
+        records: Optional[Sequence[Dict[str, Any]]] = None,
+        split_name: str = "training",
     ):
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -101,7 +109,13 @@ class PrefixNextTokenDataset(Dataset):
         self.examples = []
         raw_examples = 0
         skipped_overlength = 0
-        for record in self._iter_records(path):
+        if records is None:
+            if path is None:
+                raise ValueError("Either path or records must be provided")
+            record_iter = self._iter_records(path)
+        else:
+            record_iter = iter(records)
+        for record in record_iter:
             if max_raw_examples is not None and raw_examples >= max_raw_examples:
                 break
             text, target_char_start = self._record_to_text(record)
@@ -132,12 +146,22 @@ class PrefixNextTokenDataset(Dataset):
                 break
         if not self.examples:
             raise ValueError("No usable training examples found")
-        message = f"Loaded {len(self.examples)} training points from {raw_examples} raw examples"
+        message = f"Loaded {len(self.examples)} {split_name} points from {raw_examples} raw examples"
         if skipped_overlength:
             message += f" ({skipped_overlength} overlength examples skipped)"
         print(message)
 
-    def _iter_records(self, path: str):
+    @staticmethod
+    def load_records(path: str, max_raw_examples: Optional[int] = None) -> List[Dict[str, Any]]:
+        records = []
+        for record in PrefixNextTokenDataset._iter_records(path):
+            if max_raw_examples is not None and len(records) >= max_raw_examples:
+                break
+            records.append(record)
+        return records
+
+    @staticmethod
+    def _iter_records(path: str):
         if path.endswith(".json"):
             with open(path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -367,8 +391,18 @@ def resolve_model_dtype(args, accelerator: Accelerator) -> torch.dtype:
     return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 
-def save_checkpoint(output_dir: str, scem: SCEModule, model, tokenizer, args, step: int, accelerator: Optional[Accelerator] = None):
-    path = os.path.join(output_dir, f"step-{step}")
+def save_checkpoint(
+    output_dir: str,
+    scem: SCEModule,
+    model,
+    tokenizer,
+    args,
+    step: int,
+    accelerator: Optional[Accelerator] = None,
+    checkpoint_name: Optional[str] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+):
+    path = os.path.join(output_dir, checkpoint_name or f"step-{step}")
     os.makedirs(path, exist_ok=True)
     scem_to_save = accelerator.unwrap_model(scem) if accelerator is not None else scem
     model_to_save = accelerator.unwrap_model(model) if accelerator is not None else model
@@ -376,8 +410,96 @@ def save_checkpoint(output_dir: str, scem: SCEModule, model, tokenizer, args, st
     tokenizer.save_pretrained(path)
     with open(os.path.join(path, "training_args.json"), "w", encoding="utf-8") as handle:
         json.dump(vars(args), handle, ensure_ascii=False, indent=2)
+    if metrics is not None:
+        with open(os.path.join(path, "metrics.json"), "w", encoding="utf-8") as handle:
+            json.dump(metrics, handle, ensure_ascii=False, indent=2)
     if args.use_lora and hasattr(model_to_save, "save_pretrained"):
         model_to_save.save_pretrained(os.path.join(path, "lora"))
+
+
+def split_train_validation_records(
+    records: Sequence[Dict[str, Any]],
+    val_ratio: float,
+    seed: int,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not 0.0 <= val_ratio < 1.0:
+        raise ValueError("--val-ratio must be in [0, 1)")
+    records = list(records)
+    if val_ratio == 0.0:
+        return records, []
+    if len(records) < 2:
+        raise ValueError("--val-ratio requires at least two raw records")
+
+    val_count = max(1, int(round(len(records) * val_ratio)))
+    val_count = min(val_count, len(records) - 1)
+    indices = list(range(len(records)))
+    rng = random.Random(seed)
+    rng.shuffle(indices)
+    val_indices = set(indices[:val_count])
+    train_records = [record for index, record in enumerate(records) if index not in val_indices]
+    val_records = [record for index, record in enumerate(records) if index in val_indices]
+    return train_records, val_records
+
+
+def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaProgramStateExtractor, args, accelerator: Accelerator):
+    input_ids = batch.input_ids.to(accelerator.device)
+    attention_mask = batch.attention_mask.to(accelerator.device)
+    labels = batch.labels.to(accelerator.device)
+    states = extractor.extract_batch(batch.prefix_texts)
+    state_batch = CudaProgramStateBatch.from_states(states, device=accelerator.device)
+
+    if args.use_lora:
+        outputs = model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
+    else:
+        with torch.no_grad():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                use_cache=False,
+            )
+    last_hidden = outputs.hidden_states[-1][:, -1, :]
+    last_logits = outputs.logits[:, -1, :]
+    scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
+    adjusted_logits = last_logits + args.alpha * scem_bias
+    return F.cross_entropy(adjusted_logits, labels)
+
+
+@torch.no_grad()
+def evaluate_validation(model, scem, dataloader, extractor: CudaProgramStateExtractor, args, accelerator: Accelerator) -> float:
+    if dataloader is None:
+        raise ValueError("Validation dataloader is not available")
+
+    model_was_training = model.training
+    scem_was_training = scem.training
+    model.eval()
+    scem.eval()
+
+    total_loss = torch.tensor(0.0, device=accelerator.device)
+    total_count = torch.tensor(0.0, device=accelerator.device)
+    for batch in dataloader:
+        with accelerator.autocast():
+            loss = compute_scem_loss(model, scem, batch, extractor, args, accelerator)
+        count = torch.tensor(batch.labels.numel(), dtype=torch.float32, device=accelerator.device)
+        total_loss += loss.detach().float() * count
+        total_count += count
+
+    stats = torch.stack([total_loss, total_count])
+    gathered = accelerator.gather(stats).view(-1, 2)
+    total_loss_value = gathered[:, 0].sum().item()
+    total_count_value = gathered[:, 1].sum().item()
+    val_loss = total_loss_value / max(total_count_value, 1.0)
+
+    if model_was_training:
+        model.train()
+    if scem_was_training:
+        scem.train()
+    return val_loss
 
 
 def main():
@@ -403,16 +525,26 @@ def main():
     scem = SCEModule(scem_config).to(dtype=next(model.parameters()).dtype)
     scem.train()
 
+    raw_records = PrefixNextTokenDataset.load_records(args.train_file, max_raw_examples=args.max_raw_examples)
+    train_records, val_records = split_train_validation_records(
+        raw_records,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+    )
+    if accelerator.is_main_process and val_records:
+        print(f"Validation split: {len(val_records)} raw examples; training split: {len(train_records)} raw examples")
+
     dataset = PrefixNextTokenDataset(
-        path=args.train_file,
+        path=None,
         tokenizer=tokenizer,
         max_length=args.max_length,
         min_prefix_length=args.min_prefix_length,
         region_points_per_example=args.region_points_per_example,
         random_points_per_example=args.random_points_per_example,
         skip_overlength=args.skip_overlength,
-        max_raw_examples=args.max_raw_examples,
         max_training_points=args.max_training_points,
+        records=train_records,
+        split_name="training",
     )
     dataloader = DataLoader(
         dataset,
@@ -421,6 +553,27 @@ def main():
         collate_fn=PrefixCollator(tokenizer),
         num_workers=0,
     )
+    val_dataloader = None
+    if val_records:
+        val_dataset = PrefixNextTokenDataset(
+            path=None,
+            tokenizer=tokenizer,
+            max_length=args.max_length,
+            min_prefix_length=args.min_prefix_length,
+            region_points_per_example=args.region_points_per_example,
+            random_points_per_example=args.random_points_per_example,
+            skip_overlength=args.skip_overlength,
+            max_training_points=None,
+            records=val_records,
+            split_name="validation",
+        )
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            collate_fn=PrefixCollator(tokenizer),
+            num_workers=0,
+        )
 
     trainable_params = list(scem.parameters()) + [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.lr, weight_decay=args.weight_decay)
@@ -428,54 +581,41 @@ def main():
     total_steps = max(1, total_steps)
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-    extractor = CudaProgramStateExtractor(task_family=args.task_family, tensor_rank=args.tensor_rank)
+    extractor = CudaProgramStateExtractor()
 
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
     accelerator.wait_for_everyone()
 
-    model, scem, optimizer, dataloader, scheduler = accelerator.prepare(
-        model,
-        scem,
-        optimizer,
-        dataloader,
-        scheduler,
-    )
+    if val_dataloader is None:
+        model, scem, optimizer, dataloader, scheduler = accelerator.prepare(
+            model,
+            scem,
+            optimizer,
+            dataloader,
+            scheduler,
+        )
+    else:
+        model, scem, optimizer, dataloader, scheduler, val_dataloader = accelerator.prepare(
+            model,
+            scem,
+            optimizer,
+            dataloader,
+            scheduler,
+            val_dataloader,
+        )
     trainable_params = [p for p in list(scem.parameters()) + list(model.parameters()) if p.requires_grad]
 
     global_step = 0
+    best_val_loss = float("inf")
+    best_step = 0
     optimizer.zero_grad(set_to_none=True)
 
     for epoch in range(args.epochs):
         for local_step, batch in enumerate(dataloader):
-            input_ids = batch.input_ids.to(accelerator.device)
-            attention_mask = batch.attention_mask.to(accelerator.device)
-            labels = batch.labels.to(accelerator.device)
-            states = extractor.extract_batch(batch.prefix_texts)
-            state_batch = CudaProgramStateBatch.from_states(states, device=accelerator.device)
-
             with accelerator.accumulate(model, scem):
                 with accelerator.autocast():
-                    if args.use_lora:
-                        outputs = model(
-                            input_ids=input_ids,
-                            attention_mask=attention_mask,
-                            output_hidden_states=True,
-                            use_cache=False,
-                        )
-                    else:
-                        with torch.no_grad():
-                            outputs = model(
-                                input_ids=input_ids,
-                                attention_mask=attention_mask,
-                                output_hidden_states=True,
-                                use_cache=False,
-                            )
-                    last_hidden = outputs.hidden_states[-1][:, -1, :]
-                    last_logits = outputs.logits[:, -1, :]
-                    scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
-                    adjusted_logits = last_logits + args.alpha * scem_bias
-                    loss = F.cross_entropy(adjusted_logits, labels)
+                    loss = compute_scem_loss(model, scem, batch, extractor, args, accelerator)
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -493,13 +633,77 @@ def main():
                     accelerator.print(f"epoch={epoch} step={global_step} loss={current_loss:.4f} lr={lr:.2e}")
 
                 if args.save_steps > 0 and global_step % args.save_steps == 0:
+                    metrics = {"step": global_step}
+                    if val_dataloader is not None:
+                        val_loss = evaluate_validation(model, scem, val_dataloader, extractor, args, accelerator)
+                        metrics["val_loss"] = val_loss
+                        accelerator.print(f"epoch={epoch} step={global_step} val_loss={val_loss:.4f}")
+                        if val_loss < best_val_loss:
+                            best_val_loss = val_loss
+                            best_step = global_step
+                            if accelerator.is_main_process:
+                                save_checkpoint(
+                                    args.output_dir,
+                                    scem,
+                                    model,
+                                    tokenizer,
+                                    args,
+                                    global_step,
+                                    accelerator,
+                                    checkpoint_name="best",
+                                    metrics={**metrics, "best_step": best_step},
+                                )
+                            accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
-                        save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step, accelerator)
+                        save_checkpoint(
+                            args.output_dir,
+                            scem,
+                            model,
+                            tokenizer,
+                            args,
+                            global_step,
+                            accelerator,
+                            metrics=metrics,
+                        )
                     accelerator.wait_for_everyone()
 
+    final_metrics = {"step": global_step}
+    if val_dataloader is not None:
+        val_loss = evaluate_validation(model, scem, val_dataloader, extractor, args, accelerator)
+        final_metrics["val_loss"] = val_loss
+        accelerator.print(f"final step={global_step} val_loss={val_loss:.4f}")
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_step = global_step
+            if accelerator.is_main_process:
+                save_checkpoint(
+                    args.output_dir,
+                    scem,
+                    model,
+                    tokenizer,
+                    args,
+                    global_step,
+                    accelerator,
+                    checkpoint_name="best",
+                    metrics={**final_metrics, "best_step": best_step},
+                )
+            accelerator.wait_for_everyone()
+        final_metrics["best_val_loss"] = best_val_loss
+        final_metrics["best_step"] = best_step
     if accelerator.is_main_process:
-        save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step, accelerator)
-        print(f"Training complete. Saved checkpoint to {args.output_dir}/step-{global_step}")
+        save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step, accelerator, metrics=final_metrics)
+        save_checkpoint(
+            args.output_dir,
+            scem,
+            model,
+            tokenizer,
+            args,
+            global_step,
+            accelerator,
+            checkpoint_name="final",
+            metrics=final_metrics,
+        )
+        print(f"Training complete. Saved final checkpoint to {args.output_dir}/final and {args.output_dir}/step-{global_step}")
     accelerator.wait_for_everyone()
     if dist.is_available() and dist.is_initialized():
         dist.destroy_process_group()

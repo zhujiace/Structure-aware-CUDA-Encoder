@@ -75,8 +75,6 @@ def parse_args():
         help="Evaluate every Nth task after --start-index. Use 5 to sample one kernel from each five-task group.",
     )
     parser.add_argument("--alpha", type=float, default=0.3)
-    parser.add_argument("--task-family", default="unknown")
-    parser.add_argument("--tensor-rank", type=int, default=0)
     parser.add_argument("--compile-timeout", type=int, default=60)
     parser.add_argument("--run-timeout", type=int, default=60)
     parser.add_argument("--keep-temp", action="store_true")
@@ -293,8 +291,6 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
         scem_checkpoint=args.scem_checkpoint,
         lora_checkpoint=args.lora_checkpoint,
         alpha=args.alpha,
-        task_family=args.task_family,
-        tensor_rank=args.tensor_rank,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     done_ids = load_done_ids(output_path)

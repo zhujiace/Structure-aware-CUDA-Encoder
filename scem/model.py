@@ -23,8 +23,6 @@ class CudaStateMemoryEncoder(nn.Module):
     def __init__(self, config: SCEMConfig):
         super().__init__()
         self.config = config
-        self.task_family = nn.Embedding(config.num_task_families, config.state_dim)
-        self.tensor_rank = nn.Embedding(config.max_tensor_rank + 1, config.state_dim)
         self.program_region = nn.Embedding(config.num_program_regions, config.state_dim)
 
         self.static_flags = nn.Linear(config.num_static_flags, config.state_dim)
@@ -40,11 +38,8 @@ class CudaStateMemoryEncoder(nn.Module):
 
     def forward(self, state: CudaProgramStateBatch) -> torch.Tensor:
         dtype = self.static_flags.weight.dtype
-        tensor_rank = state.tensor_rank.clamp(0, self.config.max_tensor_rank)
         slots = torch.stack(
             [
-                self.task_family(state.task_family),
-                self.tensor_rank(tensor_rank),
                 self.program_region(state.program_region),
                 self.static_flags(state.static_flags.to(dtype=dtype)),
                 self.prefix_flags(state.prefix_flags.to(dtype=dtype)),

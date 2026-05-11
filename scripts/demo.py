@@ -36,8 +36,6 @@ def parse_args():
     parser.add_argument("--scem-checkpoint", default=None)
     parser.add_argument("--lora-checkpoint", default=None)
     parser.add_argument("--alpha", type=float, default=0.3)
-    parser.add_argument("--task-family", default="unknown")
-    parser.add_argument("--tensor-rank", type=int, default=0)
     parser.add_argument("--compile-timeout", type=int, default=60)
     parser.add_argument("--run-timeout", type=int, default=60)
     parser.add_argument("--keep-temp", action="store_true")
@@ -78,8 +76,6 @@ def main():
         scem_checkpoint=args.scem_checkpoint,
         lora_checkpoint=args.lora_checkpoint,
         alpha=args.alpha,
-        task_family=args.task_family,
-        tensor_rank=args.tensor_rank,
     )
     temp_root = PROJECT_ROOT / "temp_demo"
 

@@ -20,8 +20,6 @@ class SCEMConfig:
 
     # CUDA state vocab sizes. Keep these small and explicit so training data can
     # serialize states as compact integer IDs.
-    num_task_families: int = 16
-    max_tensor_rank: int = 8
     num_program_regions: int = 8
 
     # Static and dynamic binary state flags.

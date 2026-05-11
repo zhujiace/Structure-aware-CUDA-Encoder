@@ -15,7 +15,8 @@ Current stage:
 - CUDABench evaluation script is in place.
 - Kernel-only harness evaluation script is in place.
 - Training data and benchmark are available locally.
-- SCEM smoke training has produced valid `scem.pt` checkpoints for 4B/9B paths, but no full production SCEM experiment has been completed yet.
+- SCEM smoke training has produced `scem.pt` checkpoints for 4B/9B paths, but checkpoints produced before the prefix-only state extractor change should be retrained before further evaluation.
+- A first 4B SCEM-only 3-GPU run produced `/data/projects/scem/checkpoints/scem_qwen35_4b_scem_only_3gpu/step-724/scem.pt`, but it used the older state layout with manually supplied task-family/tensor-rank fields and should not be treated as compatible with current code.
 - Baseline experiments have been run for `Qwen3.5-0.8B` and `Qwen3.5-4B`; the 0.8B result is effectively unusable, while 4B has measurable but still low CUDA generation accuracy.
 
 ## Repository Structure
@@ -153,7 +154,10 @@ Important behavior:
 - Supports `text`, `prompt/completion`, `messages`, and `instruction/input/output` formats.
 - Supports `.json` and `.jsonl`.
 - Uses region anchors plus random points for next-token training.
+- CUDA state extraction is now prefix-only. Do not pass or reintroduce global `task_family` / `tensor_rank` CLI arguments unless the user explicitly asks for that design.
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
+- Supports `--val-ratio` with `--var-ratio` as a compatibility alias; validation is split by raw records and used for validation loss tracking.
+- Training now saves regular `step-*` checkpoints, `final/`, and `best/` when validation is enabled.
 - For the current `data/train.json`, `--max-length 4096` covers about 99.6% of records; `--max-length 3072 --skip-overlength` covers about 94.6% without training on truncated records.
 - Larger checkpoint output directories should use `/data/projects/scem/checkpoints/` to avoid filling the user home directory.
 - 4B and 9B LoRA training has been smoke-tested with Accelerate/DDP; current DDP duplicates the full backbone on each GPU, so it improves throughput but does not reduce per-GPU model memory.
@@ -323,9 +327,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -344,9 +349,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -365,6 +371,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --use-lora \
   --lora-r 8 \
   --lora-alpha 16 \
@@ -372,7 +379,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --gradient-checkpointing \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -391,6 +398,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --use-lora \
   --lora-r 8 \
   --lora-alpha 16 \
@@ -398,7 +406,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --gradient-checkpointing \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -412,7 +420,7 @@ For a safer 9B LoRA pilot before a full run, replace the corresponding values ab
 --lora-alpha 8
 ```
 
-Verified smoke paths:
+Previously verified smoke paths from the pre-prefix-only state layout:
 
 ```text
 4B SCEM-only single GPU: /data/projects/scem/checkpoints/smoke/scem_qwen35_4b_scem_only_smoke/step-1/scem.pt
@@ -425,14 +433,16 @@ Verified smoke paths:
 
 Current factual status:
 
-- Smoke training produces valid `scem.pt` checkpoints for 4B and 9B.
+- Previous smoke training produced `scem.pt` checkpoints for 4B and 9B, but those checkpoints predate the removal of task-family/tensor-rank state fields and should be retrained for current-code evaluation.
+- A 4B SCEM-only 3-GPU training run completed at `/data/projects/scem/checkpoints/scem_qwen35_4b_scem_only_3gpu/step-724/scem.pt`; it also predates the prefix-only state extractor change and should not be used with current SCEM architecture.
 - Baselines have been tried for `Qwen3.5-0.8B` and `Qwen3.5-4B`.
 - The 0.8B baseline did not solve CUDABench tasks in a usable way.
 - The best current 4B baseline is kernel-only harness eval at compile 0.26 and functionality 0.19 on `level1_prompt`, `task_stride=5`, before rerunning with the latest stopping changes.
 - Larger local backbones are now available under `/data/projects/scem/models/`.
 - `Qwen3.5-4B` and `Qwen3.5-9B` are compatible with the current Hugging Face/Qwen integration path.
-- `Qwen3.5-4B` SCEM-only DDP and `Qwen3.5-9B` LoRA DDP smoke tests have completed successfully.
+- `Qwen3.5-4B` SCEM-only DDP and `Qwen3.5-9B` LoRA DDP smoke tests completed successfully before the state-layout change.
 - SCEM checkpoints are backbone-shape specific; retrain SCEM for 4B or 9B instead of reusing a 0.8B SCEM checkpoint.
+- SCEM checkpoints are also architecture/state-layout specific; retrain after changes to `scem/config.py`, `scem/model.py`, or `scem/states.py`.
 - Therefore, the next session should focus primarily on experiments, not basic infrastructure.
 
 Latest evaluation results currently present under `eval_outputs/`:
@@ -510,6 +520,11 @@ It expands each CUDA example into multiple next-token points based on region anc
 
 `scem/states.py` is intentionally heuristic and cheap.  
 Do not replace it with a heavy parser unless the user explicitly wants that tradeoff.
+
+### State extractor is prefix-only
+
+The current SCEM state no longer includes manually supplied task-family or tensor-rank fields.  
+All structural features should be derived from the partial CUDA prefix scanned by `scem/states.py`.
 
 ## Code Style and Editing Rules
 

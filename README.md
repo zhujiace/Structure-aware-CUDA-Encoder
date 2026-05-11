@@ -90,8 +90,6 @@ Bias head parameters:
 
 CUDA state vocabulary parameters:
 
-- `num_task_families`: task-family embedding size.
-- `max_tensor_rank`: max tensor-rank embedding index.
 - `num_program_regions`: program-region embedding size.
 - `num_static_flags`: number of static CUDA flags.
 - `num_prefix_flags`: number of dynamic prefix flags.
@@ -129,7 +127,7 @@ Use them by passing `--model-path`:
   --use-scem-prompt
 ```
 
-SCEM checkpoints are backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same.
+SCEM checkpoints are architecture- and backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same. Checkpoints produced before the removal of manually supplied task-family/tensor-rank state fields should be retrained with the current prefix-only state extractor.
 
 ## CUDA State Extraction
 
@@ -137,8 +135,6 @@ SCEM checkpoints are backbone-shape specific. A checkpoint trained with Qwen3.5-
 
 It extracts:
 
-- task family
-- tensor rank
 - current program region
 - whether a guard may be needed
 - whether shared memory may be needed
@@ -513,9 +509,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -534,9 +531,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -555,6 +553,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --use-lora \
   --lora-r 8 \
   --lora-alpha 16 \
@@ -562,7 +561,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --gradient-checkpointing \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -581,6 +580,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --epochs 1 \
   --region-points-per-example 8 \
   --random-points-per-example 2 \
+  --val-ratio 0.05 \
   --use-lora \
   --lora-r 8 \
   --lora-alpha 16 \
@@ -588,7 +588,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
   --gradient-checkpointing \
   --mixed-precision bf16 \
   --model-dtype bfloat16 \
-  --save-steps 100000 \
+  --save-steps 200 \
   --log-steps 10
 ```
 
@@ -604,7 +604,7 @@ For a safer 9B LoRA pilot before a full run, replace the corresponding values ab
 --lora-alpha 8
 ```
 
-Current verified smoke paths:
+Previously verified smoke paths from the pre-prefix-only state layout:
 
 ```text
 4B SCEM-only single GPU: /data/projects/scem/checkpoints/smoke/scem_qwen35_4b_scem_only_smoke/step-1/scem.pt
@@ -622,6 +622,7 @@ Data and sequence:
 - `--skip-overlength`: skip examples longer than `--max-length` instead of truncating them.
 - `--max-raw-examples`: read only the first N raw records, intended for smoke tests.
 - `--max-training-points`: keep only the first N expanded training points, intended for smoke tests.
+- `--val-ratio` / `--var-ratio`: reserve a fraction of raw records for validation loss tracking. `--var-ratio` is accepted only as a compatibility alias.
 - `--min-prefix-length`: minimum prefix length before a target token can be sampled.
 - `--region-points-per-example`: max region-aware points per raw sample.
 - `--random-points-per-example`: random points per raw sample.
@@ -641,8 +642,6 @@ SCEM:
 
 - `--alpha`: training-time SCEM bias scale.
 - `--bias-rank`: low-rank vocab bias rank.
-- `--task-family`: task family passed to the CUDA state extractor.
-- `--tensor-rank`: tensor rank passed to the CUDA state extractor.
 
 Backbone:
 
@@ -655,15 +654,25 @@ Backbone:
 
 ## Checkpoints
 
-Training saves checkpoints under:
+Training saves regular step checkpoints under:
 
 ```text
 <output-dir>/step-<global_step>/
   scem.pt
+  metrics.json
   training_args.json
   tokenizer files
   lora/                only when --use-lora is enabled
 ```
+
+It also saves:
+
+```text
+<output-dir>/final/     final training step
+<output-dir>/best/      lowest validation loss, only when --val-ratio > 0
+```
+
+Validation loss is computed at `--save-steps` intervals and once at the final step.
 
 Load a LoRA adapter during demo/evaluation with `--lora-checkpoint <checkpoint>/lora`.
 
@@ -697,12 +706,15 @@ Training smoke test requires a small JSON/JSONL file:
   --train-file data/train.json \
   --output-dir /data/projects/scem/checkpoints/smoke/scem_smoke \
   --max-length 512 \
+  --max-raw-examples 4 \
+  --max-training-points 4 \
+  --val-ratio 0.25 \
   --region-points-per-example 2 \
   --random-points-per-example 1 \
   --batch-size 1 \
   --grad-accum-steps 1 \
   --epochs 1 \
-  --save-steps 0 \
+  --save-steps 1 \
   --log-steps 1
 ```
 

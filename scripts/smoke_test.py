@@ -16,7 +16,7 @@ def main():
     config = SCEMConfig.from_lm_config(lm_config, bias_rank=32)
     scem = SCEModule(config)
 
-    extractor = CudaProgramStateExtractor(task_family="elementwise", tensor_rank=1)
+    extractor = CudaProgramStateExtractor()
     states = extractor.extract_batch(
         [
             '__global__ void add(float* x, float* y, float* out, int n) { int idx = blockIdx.x * blockDim.x + threadIdx.x; if (idx < n) { out[idx] =',

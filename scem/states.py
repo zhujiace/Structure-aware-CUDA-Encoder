@@ -4,17 +4,6 @@ from typing import Iterable, List, Sequence
 import torch
 
 
-TASK_FAMILIES = {
-    "unknown": 0,
-    "elementwise": 1,
-    "reduction": 2,
-    "matmul": 3,
-    "stencil": 4,
-    "scan": 5,
-    "transpose": 6,
-    "convolution": 7,
-}
-
 PROGRAM_REGIONS = {
     "unknown": 0,
     "signature": 1,
@@ -31,8 +20,6 @@ PROGRAM_REGIONS = {
 class CudaProgramState:
     """Compact CUDA program state for one decoding prefix."""
 
-    task_family: int = 0
-    tensor_rank: int = 0
     program_region: int = 0
     may_need_guard: bool = False
     may_need_shared_memory: bool = False
@@ -50,8 +37,6 @@ class CudaProgramState:
 
 @dataclass
 class CudaProgramStateBatch:
-    task_family: torch.LongTensor
-    tensor_rank: torch.LongTensor
     program_region: torch.LongTensor
     static_flags: torch.Tensor
     prefix_flags: torch.Tensor
@@ -59,8 +44,6 @@ class CudaProgramStateBatch:
 
     def to(self, device: torch.device | str) -> "CudaProgramStateBatch":
         return CudaProgramStateBatch(
-            task_family=self.task_family.to(device),
-            tensor_rank=self.tensor_rank.to(device),
             program_region=self.program_region.to(device),
             static_flags=self.static_flags.to(device),
             prefix_flags=self.prefix_flags.to(device),
@@ -73,8 +56,6 @@ class CudaProgramStateBatch:
         states: Sequence[CudaProgramState],
         device: torch.device | str | None = None,
     ) -> "CudaProgramStateBatch":
-        task_family = torch.tensor([s.task_family for s in states], dtype=torch.long, device=device)
-        tensor_rank = torch.tensor([s.tensor_rank for s in states], dtype=torch.long, device=device)
         program_region = torch.tensor([s.program_region for s in states], dtype=torch.long, device=device)
         static_flags = torch.tensor(
             [
@@ -106,8 +87,6 @@ class CudaProgramStateBatch:
             device=device,
         )
         return cls(
-            task_family=task_family,
-            tensor_rank=tensor_rank,
             program_region=program_region,
             static_flags=static_flags,
             prefix_flags=prefix_flags,
@@ -117,12 +96,6 @@ class CudaProgramStateBatch:
 
 class CudaProgramStateExtractor:
     """Heuristic prefix-state extractor used before a learned/parser extractor exists."""
-
-    def __init__(self, task_family: str | int = "unknown", tensor_rank: int = 0):
-        if isinstance(task_family, str):
-            task_family = TASK_FAMILIES.get(task_family, TASK_FAMILIES["unknown"])
-        self.task_family = task_family
-        self.tensor_rank = tensor_rank
 
     def extract_batch(self, prefixes: Iterable[str]) -> List[CudaProgramState]:
         return [self.extract(prefix) for prefix in prefixes]
@@ -150,10 +123,8 @@ class CudaProgramStateExtractor:
 
         region = self._infer_region(prefix, has_guard_token, has_shared, has_write_back)
         return CudaProgramState(
-            task_family=self.task_family,
-            tensor_rank=self.tensor_rank,
             program_region=region,
-            may_need_guard=self.tensor_rank > 0,
+            may_need_guard=self._infer_may_need_guard(prefix, has_guard_token),
             may_need_shared_memory=any(token in lowered for token in ("matmul", "tile", "shared")),
             may_need_synchronization=has_shared or "shared" in lowered or "tile" in lowered,
             has_index_definition=has_index,
@@ -182,3 +153,24 @@ class CudaProgramStateExtractor:
         if "{" in prefix:
             return PROGRAM_REGIONS["compute"]
         return PROGRAM_REGIONS["setup"]
+
+    @staticmethod
+    def _infer_may_need_guard(prefix: str, has_guard: bool) -> bool:
+        if has_guard:
+            return True
+        if not any(token in prefix for token in ("threadIdx.", "blockIdx.", "blockDim.")):
+            return False
+        return any(
+            token in prefix
+            for token in (
+                " int n",
+                "int n,",
+                "int n)",
+                " size",
+                " length",
+                " width",
+                " height",
+                " num",
+                " N",
+            )
+        )
