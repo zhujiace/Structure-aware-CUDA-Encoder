@@ -688,7 +688,9 @@ train_outputs/<run-name>/
   metrics.csv         same metrics in spreadsheet-friendly format
   summary.json        final_step, best_step, best_val_loss, output paths
   training_args.json  exact CLI arguments
-  loss_curve.png      train_loss and val_loss curves, generated when matplotlib is available
+  figs/
+    train_loss.png    train-loss curve, generated when matplotlib is available
+    val_loss.png      validation-loss curve, generated when matplotlib is available
 ```
 
 If `--train-run-name` is omitted, the run name is derived from `--output-dir` and a timestamp.
@@ -700,7 +702,7 @@ tail -n 20 train_outputs/<run-name>/metrics.csv
 cat train_outputs/<run-name>/summary.json
 ```
 
-Open `loss_curve.png` to inspect the training and validation loss trend. The plot is updated at validation events and at the final step; train-only log events append CSV/JSONL rows without redrawing the image. Training loss points are logged every `--log-steps`; validation loss points are logged every `--save-steps` and at the final step. The `best_step` in `summary.json` is the checkpoint step copied to `<output-dir>/best/`.
+Open `figs/train_loss.png` and `figs/val_loss.png` to inspect the training and validation loss trends separately. The plots are updated at validation events and at the final step; train-only log events append CSV/JSONL rows without redrawing images. Training loss points are logged every `--log-steps`; validation loss points are logged every `--save-steps` and at the final step. The `best_step` in `summary.json` is the checkpoint step copied to `<output-dir>/best/`.
 
 Load a LoRA adapter during demo/evaluation with `--lora-checkpoint <checkpoint>/lora`.
 

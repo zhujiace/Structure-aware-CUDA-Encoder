@@ -448,7 +448,10 @@ class TrainingRunLogger:
         self.jsonl_path = self.path / "metrics.jsonl"
         self.csv_path = self.path / "metrics.csv"
         self.summary_path = self.path / "summary.json"
-        self.plot_path = self.path / "loss_curve.png"
+        self.figs_dir = self.path / "figs"
+        self.figs_dir.mkdir(parents=True, exist_ok=True)
+        self.train_plot_path = self.figs_dir / "train_loss.png"
+        self.val_plot_path = self.figs_dir / "val_loss.png"
         self.records: List[Dict[str, Any]] = []
         self.summary: Dict[str, Any] = {
             "run_name": run_name,
@@ -461,6 +464,9 @@ class TrainingRunLogger:
             "best_val_loss": None,
             "final_step": None,
             "final_val_loss": None,
+            "figs_dir": str(self.figs_dir),
+            "train_loss_plot": str(self.train_plot_path),
+            "val_loss_plot": str(self.val_plot_path),
         }
         with open(self.path / "training_args.json", "w", encoding="utf-8") as handle:
             json.dump(vars(args), handle, ensure_ascii=False, indent=2)
@@ -510,28 +516,35 @@ class TrainingRunLogger:
         except Exception:
             return
 
-        train_steps = [row["step"] for row in self.records if row.get("train_loss") is not None]
-        train_losses = [row["train_loss"] for row in self.records if row.get("train_loss") is not None]
+        train_steps = [row["step"] for row in self.records if row.get("event") == "train" and row.get("train_loss") is not None]
+        train_losses = [row["train_loss"] for row in self.records if row.get("event") == "train" and row.get("train_loss") is not None]
         val_steps = [row["step"] for row in self.records if row.get("val_loss") is not None]
         val_losses = [row["val_loss"] for row in self.records if row.get("val_loss") is not None]
         if not train_steps and not val_steps:
             return
 
-        plt.figure(figsize=(8, 4.5))
         if train_steps:
+            plt.figure(figsize=(8, 4.5))
             plt.plot(train_steps, train_losses, label="train_loss")
+            plt.xlabel("step")
+            plt.ylabel("train loss")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(self.train_plot_path)
+            plt.close()
         if val_steps:
+            plt.figure(figsize=(8, 4.5))
             plt.plot(val_steps, val_losses, marker="o", label="val_loss")
-        best_step = self.summary.get("best_step")
-        best_val_loss = self.summary.get("best_val_loss")
-        if best_step is not None and best_val_loss is not None:
-            plt.scatter([best_step], [best_val_loss], color="red", zorder=3, label=f"best step {best_step}")
-        plt.xlabel("step")
-        plt.ylabel("loss")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(self.plot_path)
-        plt.close()
+            best_step = self.summary.get("best_step")
+            best_val_loss = self.summary.get("best_val_loss")
+            if best_step is not None and best_val_loss is not None:
+                plt.scatter([best_step], [best_val_loss], color="red", zorder=3, label=f"best step {best_step}")
+            plt.xlabel("step")
+            plt.ylabel("validation loss")
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(self.val_plot_path)
+            plt.close()
 
 
 def split_train_validation_records(

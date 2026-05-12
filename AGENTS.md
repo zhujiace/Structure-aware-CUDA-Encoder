@@ -163,7 +163,7 @@ Important behavior:
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
 - Supports `--val-ratio` with `--var-ratio` as a compatibility alias; validation is split by raw records and used for validation loss tracking.
 - Training now saves regular `step-*` checkpoints, `final/`, and `best/` when validation is enabled.
-- Training writes run logs under `train_outputs/<run-name>/` by default: `metrics.jsonl`, `metrics.csv`, `summary.json`, `training_args.json`, and `loss_curve.png` when matplotlib is available.
+- Training writes run logs under `train_outputs/<run-name>/` by default: `metrics.jsonl`, `metrics.csv`, `summary.json`, `training_args.json`, and separate plots under `figs/` when matplotlib is available.
 - For the current `data/train.json`, `--max-length 4096` covers about 99.6% of records; `--max-length 3072 --skip-overlength` covers about 94.6% without training on truncated records.
 - Larger checkpoint output directories should use `/data/projects/scem/checkpoints/` to avoid filling the user home directory.
 - 4B and 9B LoRA training has been smoke-tested with Accelerate/DDP; current DDP duplicates the full backbone on each GPU, so it improves throughput but does not reduce per-GPU model memory.
