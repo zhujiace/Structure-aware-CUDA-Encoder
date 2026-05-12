@@ -342,14 +342,16 @@ Pass `--output-dir` only when you intentionally want to use a fixed directory. F
 
 In `eval_results.jsonl`, compile/functionality fields plus run metadata such as `level`, `model_path`, and `scem_checkpoint` are written before long fields such as `prompt`, `code*`, and `response*` so results remain easy to inspect in IDEs.
 
-`summary.json` reports both version-level and task-level metrics:
+`summary.json` reports sample-level and pass@k metrics:
 
 - `level`: CUDABench prompt level used for generation.
 - `model_path`: backbone model used for generation.
-- `compile_accuracy`: compiled samples / total samples
-- `functionality_accuracy`: functional samples / total samples
-- `task_compile_pass_rate`: tasks with at least one compiling sample / total tasks
-- `task_functionality_pass_rate`: tasks with at least one functional sample / total tasks
+- `sample_compile_accuracy`: compiled samples / total generated samples.
+- `sample_functionality_accuracy`: functional samples / total generated samples.
+- `compile_pass@1`: tasks whose first generated sample compiles / total tasks.
+- `functionality_pass@1`: tasks whose first generated sample is functional / total tasks.
+- `compile_pass@k`: tasks with at least one compiling sample among `k = --num-samples` generations / total tasks.
+- `functionality_pass@k`: tasks with at least one functional sample among `k = --num-samples` generations / total tasks.
 
 ### Re-evaluating Existing Generations
 
@@ -623,6 +625,8 @@ Data and sequence:
 - `--max-raw-examples`: read only the first N raw records, intended for smoke tests.
 - `--max-training-points`: keep only the first N expanded training points, intended for smoke tests.
 - `--val-ratio` / `--var-ratio`: reserve a fraction of raw records for validation loss tracking. `--var-ratio` is accepted only as a compatibility alias.
+- `--train-output-dir`: directory for training logs and loss curves, default `train_outputs`.
+- `--train-run-name`: optional subdirectory name under `--train-output-dir`.
 - `--min-prefix-length`: minimum prefix length before a target token can be sampled.
 - `--region-points-per-example`: max region-aware points per raw sample.
 - `--random-points-per-example`: random points per raw sample.
@@ -673,6 +677,30 @@ It also saves:
 ```
 
 Validation loss is computed at `--save-steps` intervals and once at the final step.
+
+## Training Outputs
+
+Each training run writes lightweight logs under:
+
+```text
+train_outputs/<run-name>/
+  metrics.jsonl       append-only train/validation events
+  metrics.csv         same metrics in spreadsheet-friendly format
+  summary.json        final_step, best_step, best_val_loss, output paths
+  training_args.json  exact CLI arguments
+  loss_curve.png      generated when matplotlib is available
+```
+
+If `--train-run-name` is omitted, the run name is derived from `--output-dir` and a timestamp.
+
+Useful inspection commands:
+
+```bash
+tail -n 20 train_outputs/<run-name>/metrics.csv
+cat train_outputs/<run-name>/summary.json
+```
+
+Open `loss_curve.png` to inspect the training and validation loss trend. The `best_step` in `summary.json` is the checkpoint step copied to `<output-dir>/best/`.
 
 Load a LoRA adapter during demo/evaluation with `--lora-checkpoint <checkpoint>/lora`.
 

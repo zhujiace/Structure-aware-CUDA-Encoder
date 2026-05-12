@@ -6,4 +6,5 @@ __pycache__/
 archive/
 checkpoints/
 eval_outputs/
+train_outputs/
 temp/

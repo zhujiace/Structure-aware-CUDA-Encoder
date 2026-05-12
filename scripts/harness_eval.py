@@ -352,6 +352,8 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
     function_ok_versions = 0
     task_compile_pass = 0
     task_function_pass = 0
+    first_sample_compile_pass = 0
+    first_sample_function_pass = 0
 
     with open(eval_path, "w", encoding="utf-8") as handle:
         for record_index, record in enumerate(records, start=1):
@@ -411,6 +413,11 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
                 if functionality:
                     function_ok_versions += 1
                     task_has_function = True
+                if sample_idx == 1:
+                    if compile_ok:
+                        first_sample_compile_pass += 1
+                    if functionality:
+                        first_sample_function_pass += 1
 
                 if not args.keep_temp:
                     shutil.rmtree(work_dir, ignore_errors=True)
@@ -461,14 +468,18 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
         "start_index": args.start_index,
         "task_stride": args.task_stride,
         "limit": args.limit,
-        "compile_accuracy": safe_div(compile_ok_versions, total_versions),
-        "functionality_accuracy": safe_div(function_ok_versions, total_versions),
-        "task_compile_pass_rate": safe_div(task_compile_pass, total_tasks),
-        "task_functionality_pass_rate": safe_div(task_function_pass, total_tasks),
-        "compile_ok_versions": compile_ok_versions,
-        "function_ok_versions": function_ok_versions,
-        "task_compile_pass": task_compile_pass,
-        "task_function_pass": task_function_pass,
+        "sample_compile_accuracy": safe_div(compile_ok_versions, total_versions),
+        "sample_functionality_accuracy": safe_div(function_ok_versions, total_versions),
+        "compile_pass@1": safe_div(first_sample_compile_pass, total_tasks),
+        "functionality_pass@1": safe_div(first_sample_function_pass, total_tasks),
+        f"compile_pass@{args.num_samples}": safe_div(task_compile_pass, total_tasks),
+        f"functionality_pass@{args.num_samples}": safe_div(task_function_pass, total_tasks),
+        "sample_compile_pass": compile_ok_versions,
+        "sample_functionality_pass": function_ok_versions,
+        "compile_pass@1_count": first_sample_compile_pass,
+        "functionality_pass@1_count": first_sample_function_pass,
+        f"compile_pass@{args.num_samples}_count": task_compile_pass,
+        f"functionality_pass@{args.num_samples}_count": task_function_pass,
         "results_jsonl": str(results_path),
         "eval_jsonl": str(eval_path),
     }

@@ -1,10 +1,13 @@
 import argparse
+import csv
 import json
 import math
 import os
 import random
+import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -28,6 +31,8 @@ def parse_args():
     parser.add_argument("--model-path", default="./models/Qwen3.5-0.8B")
     parser.add_argument("--train-file", required=True, help="JSONL file with text, prompt/completion, or messages.")
     parser.add_argument("--output-dir", default="./checkpoints/scem")
+    parser.add_argument("--train-output-dir", default="train_outputs", help="Directory for training logs, metrics, summaries, and optional loss plots.")
+    parser.add_argument("--train-run-name", default=None, help="Optional name for the subdirectory under --train-output-dir.")
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--min-prefix-length", type=int, default=16)
     parser.add_argument("--skip-overlength", action="store_true", help="Skip examples longer than --max-length instead of truncating them.")
@@ -417,6 +422,117 @@ def save_checkpoint(
         model_to_save.save_pretrained(os.path.join(path, "lora"))
 
 
+def slugify(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip())
+    slug = slug.strip("._-")
+    return slug or "run"
+
+
+class TrainingRunLogger:
+    fieldnames = [
+        "event",
+        "epoch",
+        "step",
+        "train_loss",
+        "val_loss",
+        "lr",
+        "best_val_loss",
+        "best_step",
+    ]
+
+    def __init__(self, args, train_points: int, val_points: int, total_steps: int):
+        base = Path(args.train_output_dir)
+        run_name = args.train_run_name or f"{slugify(Path(args.output_dir).name)}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
+        self.path = base / run_name
+        self.path.mkdir(parents=True, exist_ok=True)
+        self.jsonl_path = self.path / "metrics.jsonl"
+        self.csv_path = self.path / "metrics.csv"
+        self.summary_path = self.path / "summary.json"
+        self.plot_path = self.path / "loss_curve.png"
+        self.records: List[Dict[str, Any]] = []
+        self.summary: Dict[str, Any] = {
+            "run_name": run_name,
+            "output_dir": args.output_dir,
+            "train_output_dir": str(self.path),
+            "train_points": train_points,
+            "val_points": val_points,
+            "total_steps": total_steps,
+            "best_step": None,
+            "best_val_loss": None,
+            "final_step": None,
+            "final_val_loss": None,
+        }
+        with open(self.path / "training_args.json", "w", encoding="utf-8") as handle:
+            json.dump(vars(args), handle, ensure_ascii=False, indent=2)
+        with open(self.csv_path, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=self.fieldnames)
+            writer.writeheader()
+        self._write_summary()
+
+    def append(self, **record) -> None:
+        normalized = {key: record.get(key) for key in self.fieldnames}
+        self.records.append(normalized)
+        with open(self.jsonl_path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(normalized, ensure_ascii=False) + "\n")
+        with open(self.csv_path, "a", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=self.fieldnames)
+            writer.writerow(normalized)
+        if normalized.get("val_loss") is not None:
+            self.summary["final_val_loss"] = normalized["val_loss"]
+        if normalized.get("best_val_loss") is not None:
+            self.summary["best_val_loss"] = normalized["best_val_loss"]
+            self.summary["best_step"] = normalized.get("best_step")
+        self.summary["final_step"] = normalized.get("step")
+        self._write_summary()
+        self._write_plot()
+
+    def finish(self, final_step: int, best_step: int, best_val_loss: float, final_val_loss: Optional[float]) -> None:
+        self.summary["final_step"] = final_step
+        if best_step > 0 and math.isfinite(best_val_loss):
+            self.summary["best_step"] = best_step
+            self.summary["best_val_loss"] = best_val_loss
+        if final_val_loss is not None:
+            self.summary["final_val_loss"] = final_val_loss
+        self._write_summary()
+        self._write_plot()
+
+    def _write_summary(self) -> None:
+        with open(self.summary_path, "w", encoding="utf-8") as handle:
+            json.dump(self.summary, handle, ensure_ascii=False, indent=2)
+
+    def _write_plot(self) -> None:
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception:
+            return
+
+        train_steps = [row["step"] for row in self.records if row.get("train_loss") is not None]
+        train_losses = [row["train_loss"] for row in self.records if row.get("train_loss") is not None]
+        val_steps = [row["step"] for row in self.records if row.get("val_loss") is not None]
+        val_losses = [row["val_loss"] for row in self.records if row.get("val_loss") is not None]
+        if not train_steps and not val_steps:
+            return
+
+        plt.figure(figsize=(8, 4.5))
+        if train_steps:
+            plt.plot(train_steps, train_losses, label="train_loss")
+        if val_steps:
+            plt.plot(val_steps, val_losses, marker="o", label="val_loss")
+        best_step = self.summary.get("best_step")
+        best_val_loss = self.summary.get("best_val_loss")
+        if best_step is not None and best_val_loss is not None:
+            plt.scatter([best_step], [best_val_loss], color="red", zorder=3, label=f"best step {best_step}")
+        plt.xlabel("step")
+        plt.ylabel("loss")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(self.plot_path)
+        plt.close()
+
+
 def split_train_validation_records(
     records: Sequence[Dict[str, Any]],
     val_ratio: float,
@@ -582,6 +698,15 @@ def main():
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
     extractor = CudaProgramStateExtractor()
+    train_logger = None
+    if accelerator.is_main_process:
+        train_logger = TrainingRunLogger(
+            args=args,
+            train_points=len(dataset),
+            val_points=len(val_dataset) if val_dataloader is not None else 0,
+            total_steps=total_steps,
+        )
+        print(f"Training metrics will be written to {train_logger.path}")
 
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
@@ -609,6 +734,8 @@ def main():
     global_step = 0
     best_val_loss = float("inf")
     best_step = 0
+    final_val_loss = None
+    last_train_loss = None
     optimizer.zero_grad(set_to_none=True)
 
     for epoch in range(args.epochs):
@@ -629,11 +756,24 @@ def main():
 
                 if global_step % args.log_steps == 0:
                     current_loss = accelerator.gather(loss.detach()).mean().item()
+                    last_train_loss = current_loss
                     lr = scheduler.get_last_lr()[0]
                     accelerator.print(f"epoch={epoch} step={global_step} loss={current_loss:.4f} lr={lr:.2e}")
+                    if train_logger is not None:
+                        train_logger.append(
+                            event="train",
+                            epoch=epoch,
+                            step=global_step,
+                            train_loss=current_loss,
+                            lr=lr,
+                            best_val_loss=best_val_loss if math.isfinite(best_val_loss) else None,
+                            best_step=best_step or None,
+                        )
 
                 if args.save_steps > 0 and global_step % args.save_steps == 0:
                     metrics = {"step": global_step}
+                    if last_train_loss is None:
+                        last_train_loss = accelerator.gather(loss.detach()).mean().item()
                     if val_dataloader is not None:
                         val_loss = evaluate_validation(model, scem, val_dataloader, extractor, args, accelerator)
                         metrics["val_loss"] = val_loss
@@ -654,6 +794,17 @@ def main():
                                     metrics={**metrics, "best_step": best_step},
                                 )
                             accelerator.wait_for_everyone()
+                        if train_logger is not None:
+                            train_logger.append(
+                                event="validation",
+                                epoch=epoch,
+                                step=global_step,
+                                train_loss=last_train_loss,
+                                val_loss=val_loss,
+                                lr=scheduler.get_last_lr()[0],
+                                best_val_loss=best_val_loss,
+                                best_step=best_step,
+                            )
                     if accelerator.is_main_process:
                         save_checkpoint(
                             args.output_dir,
@@ -670,6 +821,7 @@ def main():
     final_metrics = {"step": global_step}
     if val_dataloader is not None:
         val_loss = evaluate_validation(model, scem, val_dataloader, extractor, args, accelerator)
+        final_val_loss = val_loss
         final_metrics["val_loss"] = val_loss
         accelerator.print(f"final step={global_step} val_loss={val_loss:.4f}")
         if val_loss < best_val_loss:
@@ -691,6 +843,23 @@ def main():
         final_metrics["best_val_loss"] = best_val_loss
         final_metrics["best_step"] = best_step
     if accelerator.is_main_process:
+        if train_logger is not None:
+            train_logger.append(
+                event="final",
+                epoch=args.epochs,
+                step=global_step,
+                train_loss=last_train_loss,
+                val_loss=final_val_loss,
+                lr=scheduler.get_last_lr()[0],
+                best_val_loss=best_val_loss if math.isfinite(best_val_loss) else None,
+                best_step=best_step or None,
+            )
+            train_logger.finish(
+                final_step=global_step,
+                best_step=best_step,
+                best_val_loss=best_val_loss,
+                final_val_loss=final_val_loss,
+            )
         save_checkpoint(args.output_dir, scem, model, tokenizer, args, global_step, accelerator, metrics=final_metrics)
         save_checkpoint(
             args.output_dir,
