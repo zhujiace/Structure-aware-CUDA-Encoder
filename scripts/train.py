@@ -469,7 +469,7 @@ class TrainingRunLogger:
             writer.writeheader()
         self._write_summary()
 
-    def append(self, **record) -> None:
+    def append(self, update_plot: bool = False, **record) -> None:
         normalized = {key: record.get(key) for key in self.fieldnames}
         self.records.append(normalized)
         with open(self.jsonl_path, "a", encoding="utf-8") as handle:
@@ -484,7 +484,8 @@ class TrainingRunLogger:
             self.summary["best_step"] = normalized.get("best_step")
         self.summary["final_step"] = normalized.get("step")
         self._write_summary()
-        self._write_plot()
+        if update_plot:
+            self._write_plot()
 
     def finish(self, final_step: int, best_step: int, best_val_loss: float, final_val_loss: Optional[float]) -> None:
         self.summary["final_step"] = final_step
@@ -804,6 +805,7 @@ def main():
                                 lr=scheduler.get_last_lr()[0],
                                 best_val_loss=best_val_loss,
                                 best_step=best_step,
+                                update_plot=True,
                             )
                     if accelerator.is_main_process:
                         save_checkpoint(
@@ -853,6 +855,7 @@ def main():
                 lr=scheduler.get_last_lr()[0],
                 best_val_loss=best_val_loss if math.isfinite(best_val_loss) else None,
                 best_step=best_step or None,
+                update_plot=True,
             )
             train_logger.finish(
                 final_step=global_step,
