@@ -159,7 +159,7 @@ Important behavior:
 - Supports `text`, `prompt/completion`, `messages`, and `instruction/input/output` formats.
 - Supports `.json` and `.jsonl`.
 - Uses region anchors plus random points for next-token training.
-- CUDA state extraction is now prefix-only. Do not pass or reintroduce global `task_family` / `tensor_rank` CLI arguments unless the user explicitly asks for that design.
+- CUDA state extraction is now generated-prefix-only. Training state uses the assistant/completion prefix, and generation state strips the fixed prompt/chat input before scanning. Do not pass or reintroduce global `task_family` / `tensor_rank` CLI arguments unless the user explicitly asks for that design.
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
 - Supports `--val-ratio` with `--var-ratio` as a compatibility alias; validation is split by raw records and used for validation loss tracking.
 - Training now saves regular `step-*` checkpoints, `final/`, and `best/` when validation is enabled.
@@ -530,7 +530,7 @@ Do not replace it with a heavy parser unless the user explicitly wants that trad
 ### State extractor is prefix-only
 
 The current SCEM state no longer includes manually supplied task-family or tensor-rank fields.  
-All structural features should be derived from the partial CUDA prefix scanned by `scem/states.py`.
+All structural features should be derived from the partial generated CUDA prefix scanned by `scem/states.py`. The extractor focuses on the active fenced code block or latest CUDA construct so benchmark prompts, harness text, and chat scaffolding do not dominate the state.
 
 ## Code Style and Editing Rules
 

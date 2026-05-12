@@ -45,7 +45,7 @@ data/train.json         Current CUDA SFT-style training data
 At each decoding step:
 
 1. Take the current final-layer hidden state `h_t` from the backbone LM.
-2. Decode the current prefix and extract CUDA program state.
+2. Decode the generated assistant/code prefix and extract CUDA program state.
 3. Encode the CUDA state into memory slots `M_t`.
 4. Run cross-attention from `h_t` to `M_t`.
 5. Fuse `[h_t; c_t]` with an MLP.
@@ -127,11 +127,11 @@ Use them by passing `--model-path`:
   --use-scem-prompt
 ```
 
-SCEM checkpoints are architecture- and backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same. Checkpoints produced before the removal of manually supplied task-family/tensor-rank state fields should be retrained with the current prefix-only state extractor.
+SCEM checkpoints are architecture- and backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same. Checkpoints produced before the removal of manually supplied task-family/tensor-rank state fields should be retrained with the current generated-prefix-only state extractor. Checkpoints trained before the prompt-stripping/code-focus state change may still load if shapes match, but should be retrained before evaluation.
 
 ## CUDA State Extraction
 
-`scem/states.py` currently uses a lightweight heuristic prefix scanner, not a full CUDA parser.
+`scem/states.py` currently uses a lightweight heuristic prefix scanner, not a full CUDA parser. During generation, SCEM strips the fixed prompt/chat input before state extraction, then focuses on the active fenced code block or latest CUDA construct so task text and harness scaffolding do not dominate the state.
 
 It extracts:
 
@@ -421,7 +421,7 @@ When LoRA is enabled, trainable parameters are LoRA adapters plus SCEM.
 
 ### Region-aware Multi-point SFT
 
-Each CUDA sample is expanded into multiple prefix next-token training points. Instead of sampling one random token per sample, the dataset finds CUDA structure anchors and creates training points around regions such as:
+Each CUDA sample is expanded into multiple prefix next-token training points. Instead of sampling one random token per sample, the dataset finds CUDA structure anchors and creates training points just after those anchors so the state prefix already contains the relevant CUDA structure. The tracked regions include:
 
 - kernel signature
 - indexing
@@ -443,7 +443,7 @@ __syncthreads
 ;, }
 ```
 
-Additional random points are added as regularization.
+Additional random points are added as regularization. For prompt/completion, messages, and instruction/output records, SCEM state extraction uses only the assistant/completion prefix, not the user prompt.
 
 ### Training Data
 

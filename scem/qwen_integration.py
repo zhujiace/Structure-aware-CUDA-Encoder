@@ -23,14 +23,22 @@ class TokenizerCudaStateProvider:
         tokenizer,
         extractor: Optional[CudaProgramStateExtractor] = None,
         skip_special_tokens: bool = False,
+        prompt_length: int = 0,
     ):
         self.tokenizer = tokenizer
         self.extractor = extractor or CudaProgramStateExtractor()
         self.skip_special_tokens = skip_special_tokens
+        self.prompt_length = prompt_length
+
+    def set_prompt_length(self, prompt_length: int) -> None:
+        self.prompt_length = max(0, int(prompt_length))
 
     def __call__(self, input_ids: torch.LongTensor) -> CudaProgramStateBatch:
+        state_input_ids = input_ids.detach().cpu()
+        if self.prompt_length:
+            state_input_ids = state_input_ids[:, min(self.prompt_length, state_input_ids.shape[-1]) :]
         prefixes = self.tokenizer.batch_decode(
-            input_ids.detach().cpu(),
+            state_input_ids,
             skip_special_tokens=self.skip_special_tokens,
         )
         states = self.extractor.extract_batch(prefixes)

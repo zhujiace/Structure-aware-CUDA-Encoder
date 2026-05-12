@@ -87,6 +87,7 @@ class TrainingPoint:
     ids: List[int]
     target_pos: int
     source: str
+    state_prefix: str
 
 
 class PrefixNextTokenDataset(Dataset):
@@ -237,6 +238,7 @@ class PrefixNextTokenDataset(Dataset):
             "prefix_ids": point.ids[: point.target_pos],
             "label": point.ids[point.target_pos],
             "source": point.source,
+            "state_prefix": point.state_prefix,
         }
 
     def _build_training_points(
@@ -257,7 +259,8 @@ class PrefixNextTokenDataset(Dataset):
                 char_pos = text.find(anchor, target_char_start)
                 if char_pos < 0:
                     continue
-                token_pos = self._char_to_token_pos(char_pos, offsets)
+                anchor_end = min(len(text) - 1, char_pos + len(anchor))
+                token_pos = self._char_to_token_pos(anchor_end, offsets)
                 if self._is_valid_target(token_pos, ids, min_target_pos) and token_pos not in seen:
                     positions.append((token_pos, region))
                     seen.add(token_pos)
@@ -281,7 +284,20 @@ class PrefixNextTokenDataset(Dataset):
             fallback = random.randint(min_target_pos, len(ids) - 1)
             positions.append((fallback, "fallback"))
 
-        return [TrainingPoint(ids=ids, target_pos=token_pos, source=source) for token_pos, source in positions]
+        points = []
+        for token_pos, source in positions:
+            prefix_end = offsets[token_pos][0] if token_pos < len(offsets) else len(text)
+            prefix_end = max(target_char_start, prefix_end)
+            state_prefix = text[target_char_start:prefix_end]
+            points.append(
+                TrainingPoint(
+                    ids=ids,
+                    target_pos=token_pos,
+                    source=source,
+                    state_prefix=state_prefix,
+                )
+            )
+        return points
 
     def _char_to_token_pos(
         self,
@@ -306,7 +322,7 @@ class PrefixBatch:
     input_ids: torch.LongTensor
     attention_mask: torch.LongTensor
     labels: torch.LongTensor
-    prefix_texts: List[str]
+    state_prefix_texts: List[str]
 
 
 class PrefixCollator:
@@ -326,12 +342,11 @@ class PrefixCollator:
             length = len(sequence)
             input_ids[row, -length:] = torch.tensor(sequence, dtype=torch.long)
             attention_mask[row, -length:] = 1
-        prefix_texts = self.tokenizer.batch_decode(input_ids, skip_special_tokens=True)
         return PrefixBatch(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
-            prefix_texts=prefix_texts,
+            state_prefix_texts=[example["state_prefix"] for example in examples],
         )
 
 
@@ -575,7 +590,7 @@ def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaProgramSta
     input_ids = batch.input_ids.to(accelerator.device)
     attention_mask = batch.attention_mask.to(accelerator.device)
     labels = batch.labels.to(accelerator.device)
-    states = extractor.extract_batch(batch.prefix_texts)
+    states = extractor.extract_batch(batch.state_prefix_texts)
     state_batch = CudaProgramStateBatch.from_states(states, device=accelerator.device)
 
     if args.use_lora:

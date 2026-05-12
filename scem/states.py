@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from typing import Iterable, List, Sequence
 
 import torch
@@ -101,15 +102,18 @@ class CudaProgramStateExtractor:
         return [self.extract(prefix) for prefix in prefixes]
 
     def extract(self, prefix: str) -> CudaProgramState:
-        lowered = prefix.lower()
-        brace_depth = max(0, prefix.count("{") - prefix.count("}"))
-        paren_depth = max(0, prefix.count("(") - prefix.count(")"))
-        has_guard_token = any(token in prefix for token in ("if (", "if(", "&&", "||"))
-        has_write_back = "=" in prefix and any(op in prefix for op in ("] =", "]= ", "]="))
-        has_shared = "__shared__" in prefix or "extern __shared__" in prefix
-        has_sync = "__syncthreads" in prefix
+        code_prefix = self._focus_cuda_prefix(prefix)
+        lowered = code_prefix.lower()
+        brace_depth = max(0, code_prefix.count("{") - code_prefix.count("}"))
+        paren_depth = max(0, code_prefix.count("(") - code_prefix.count(")"))
+        has_guard_token = bool(re.search(r"\bif\s*\(", code_prefix)) or any(
+            token in code_prefix for token in ("&&", "||")
+        )
+        has_write_back = self._has_write_back(code_prefix)
+        has_shared = "__shared__" in code_prefix or "extern __shared__" in code_prefix
+        has_sync = "__syncthreads" in code_prefix
         has_index = any(
-            token in prefix
+            token in code_prefix
             for token in (
                 "threadIdx.",
                 "blockIdx.",
@@ -121,19 +125,19 @@ class CudaProgramStateExtractor:
             )
         )
 
-        region = self._infer_region(prefix, has_guard_token, has_shared, has_write_back)
+        region = self._infer_region(code_prefix, has_guard_token, has_shared, has_write_back)
         return CudaProgramState(
             program_region=region,
-            may_need_guard=self._infer_may_need_guard(prefix, has_guard_token),
+            may_need_guard=self._infer_may_need_guard(code_prefix, has_guard_token),
             may_need_shared_memory=any(token in lowered for token in ("matmul", "tile", "shared")),
             may_need_synchronization=has_shared or "shared" in lowered or "tile" in lowered,
             has_index_definition=has_index,
-            has_open_guard=has_guard_token and prefix.rfind("if") > prefix.rfind("}"),
+            has_open_guard=self._has_open_guard(code_prefix),
             has_shared_memory=has_shared,
             has_syncthreads=has_sync,
             has_write_back=has_write_back,
             braces_balanced=brace_depth == 0,
-            statement_stable=prefix.rstrip().endswith((";", "{", "}")),
+            statement_stable=self._is_statement_stable(code_prefix),
             brace_depth=float(min(brace_depth, 32)) / 32.0,
             paren_depth=float(min(paren_depth, 32)) / 32.0,
         )
@@ -153,6 +157,52 @@ class CudaProgramStateExtractor:
         if "{" in prefix:
             return PROGRAM_REGIONS["compute"]
         return PROGRAM_REGIONS["setup"]
+
+    @staticmethod
+    def _focus_cuda_prefix(prefix: str) -> str:
+        """Return the generated CUDA/code portion instead of prompt scaffolding."""
+
+        if not prefix:
+            return ""
+
+        fences = list(re.finditer(r"```[^\n`]*\n?", prefix))
+        if fences:
+            if len(fences) % 2 == 1:
+                return prefix[fences[-1].end() :]
+            return prefix[fences[-2].end() : fences[-1].start()]
+
+        cuda_markers = [
+            "__global__",
+            "__device__",
+            "__host__",
+            "#include",
+            "extern \"C\"",
+        ]
+        starts = [prefix.find(marker) for marker in cuda_markers if marker in prefix]
+        if starts:
+            return prefix[min(starts) :]
+        return prefix
+
+    @staticmethod
+    def _has_write_back(prefix: str) -> bool:
+        if any(token in prefix for token in ("atomicAdd", "atomicMax", "atomicMin", "atomicCAS")):
+            return True
+        return bool(re.search(r"\b[a-zA-Z_]\w*(?:\s*\[[^\]]+\])+\s*=", prefix))
+
+    @staticmethod
+    def _has_open_guard(prefix: str) -> bool:
+        matches = list(re.finditer(r"\bif\s*\(", prefix))
+        if not matches:
+            return False
+        last_if = matches[-1].start()
+        return last_if > prefix.rfind("}")
+
+    @staticmethod
+    def _is_statement_stable(prefix: str) -> bool:
+        stripped = prefix.rstrip()
+        if not stripped:
+            return True
+        return stripped.endswith((";", "{", "}"))
 
     @staticmethod
     def _infer_may_need_guard(prefix: str, has_guard: bool) -> bool:

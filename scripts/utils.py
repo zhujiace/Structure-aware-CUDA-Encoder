@@ -345,6 +345,7 @@ class LocalGenerator:
         self.model.to(self.device)
         self.model.eval()
         self.logits_processor = None
+        self.state_provider = None
 
         if enable_scem or scem_checkpoint:
             model_dtype = next(self.model.parameters()).dtype
@@ -358,6 +359,7 @@ class LocalGenerator:
                 tokenizer=self.tokenizer,
                 extractor=CudaProgramStateExtractor(),
             )
+            self.state_provider = state_provider
             attach_scem_hidden_state_capture(self.model)
             self.logits_processor = LogitsProcessorList(
                 [
@@ -386,13 +388,16 @@ class LocalGenerator:
             add_generation_prompt=True,
             return_tensors="pt",
         ).to(self.device)
+        prompt_length = inputs["input_ids"].shape[-1]
+        if self.state_provider is not None:
+            self.state_provider.set_prompt_length(prompt_length)
         generation_kwargs = dict(QWEN35_GENERATION_KWARGS)
         generation_kwargs["max_new_tokens"] = self.max_new_tokens
         generation_kwargs["stopping_criteria"] = StoppingCriteriaList(
             [
                 FirstCodeBlockStoppingCriteria(
                     self.tokenizer,
-                    inputs["input_ids"].shape[-1],
+                    prompt_length,
                     required_substrings=stop_required_substrings,
                     forbidden_substrings=stop_forbidden_substrings,
                 )
@@ -403,7 +408,7 @@ class LocalGenerator:
 
         with torch.no_grad():
             output_ids = self.model.generate(**inputs, **generation_kwargs)
-        generated_ids = output_ids[0, inputs["input_ids"].shape[-1] :]
+        generated_ids = output_ids[0, prompt_length:]
         return self.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
 
