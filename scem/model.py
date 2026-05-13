@@ -25,9 +25,12 @@ class CudaStateMemoryEncoder(nn.Module):
         self.config = config
         self.program_region = nn.Embedding(config.num_program_regions, config.state_dim)
 
-        self.static_flags = nn.Linear(config.num_static_flags, config.state_dim)
-        self.prefix_flags = nn.Linear(config.num_prefix_flags, config.state_dim)
-        self.numeric_features = nn.Linear(2, config.state_dim)
+        self.static_requirements = nn.Linear(8, config.state_dim)
+        self.task_format = nn.Linear(4, config.state_dim)
+        self.prefix_indexing = nn.Linear(4, config.state_dim)
+        self.prefix_memory_write = nn.Linear(5, config.state_dim)
+        self.prefix_kernel_control = nn.Linear(7, config.state_dim)
+        self.numeric_features = nn.Linear(config.num_numeric_features, config.state_dim)
 
         self.slot_projection = nn.Sequential(
             nn.LayerNorm(config.state_dim),
@@ -37,13 +40,19 @@ class CudaStateMemoryEncoder(nn.Module):
         )
 
     def forward(self, state: CudaProgramStateBatch) -> torch.Tensor:
-        dtype = self.static_flags.weight.dtype
+        dtype = self.static_requirements.weight.dtype
+        static_flags = state.static_flags.to(dtype=dtype)
+        prefix_flags = state.prefix_flags.to(dtype=dtype)
+        numeric_features = state.numeric_features.to(dtype=dtype)
         slots = torch.stack(
             [
                 self.program_region(state.program_region),
-                self.static_flags(state.static_flags.to(dtype=dtype)),
-                self.prefix_flags(state.prefix_flags.to(dtype=dtype)),
-                self.numeric_features(state.numeric_features.to(dtype=dtype)),
+                self.static_requirements(static_flags[:, :8]),
+                self.task_format(static_flags[:, 8:12]),
+                self.prefix_indexing(prefix_flags[:, :4]),
+                self.prefix_memory_write(prefix_flags[:, [4, 5, 6, 7, 12]]),
+                self.prefix_kernel_control(prefix_flags[:, [8, 9, 10, 11, 13, 14, 15]]),
+                self.numeric_features(numeric_features),
             ],
             dim=1,
         )

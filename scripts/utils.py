@@ -291,18 +291,20 @@ def load_scem_checkpoint(path: str, model_config, device: str, dtype: torch.dtyp
     config = checkpoint.get("config")
     if not isinstance(config, SCEMConfig):
         config = SCEMConfig.from_lm_config(model_config)
-    scem = SCEModule(config)
     state_dict = checkpoint["state_dict"]
     deprecated_keys = [
         key
         for key in state_dict
         if key.startswith("state_encoder.task_family") or key.startswith("state_encoder.tensor_rank")
+        or key.startswith("state_encoder.static_flags")
+        or key.startswith("state_encoder.prefix_flags")
     ]
-    if deprecated_keys:
+    if deprecated_keys or not hasattr(config, "num_numeric_features"):
         raise ValueError(
-            "This SCEM checkpoint uses the old task-family/tensor-rank state layout. "
-            "Retrain SCEM with the current prefix-only CUDA state extractor."
+            "This SCEM checkpoint uses an older CUDA state layout. Retrain SCEM with "
+            "the current prompt/task-aware state extractor and 7-slot state encoder."
         )
+    scem = SCEModule(config)
     scem.load_state_dict(state_dict)
     scem.to(device=device, dtype=dtype)
     scem.eval()
@@ -390,7 +392,8 @@ class LocalGenerator:
         ).to(self.device)
         prompt_length = inputs["input_ids"].shape[-1]
         if self.state_provider is not None:
-            self.state_provider.set_prompt_length(prompt_length)
+            prompt_text = self.tokenizer.decode(inputs["input_ids"][0], skip_special_tokens=True)
+            self.state_provider.set_prompt(prompt_length, prompt_text)
         generation_kwargs = dict(QWEN35_GENERATION_KWARGS)
         generation_kwargs["max_new_tokens"] = self.max_new_tokens
         generation_kwargs["stopping_criteria"] = StoppingCriteriaList(

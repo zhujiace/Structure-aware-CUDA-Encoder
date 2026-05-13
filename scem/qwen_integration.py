@@ -9,7 +9,7 @@ from torch.nn import functional as F
 
 from .decoding import SCEMLogitsProcessor
 from .model import SCEModule
-from .states import CudaProgramStateBatch, CudaProgramStateExtractor
+from .states import CudaProgramStateBatch, CudaProgramStateExtractor, GENERATED_PREFIX_MARKER
 
 
 InputStateProvider = Callable[[torch.LongTensor], CudaProgramStateBatch]
@@ -29,18 +29,27 @@ class TokenizerCudaStateProvider:
         self.extractor = extractor or CudaProgramStateExtractor()
         self.skip_special_tokens = skip_special_tokens
         self.prompt_length = prompt_length
+        self.prompt_text = ""
 
     def set_prompt_length(self, prompt_length: int) -> None:
         self.prompt_length = max(0, int(prompt_length))
+
+    def set_prompt(self, prompt_length: int, prompt_text: str) -> None:
+        self.set_prompt_length(prompt_length)
+        self.prompt_text = prompt_text or ""
 
     def __call__(self, input_ids: torch.LongTensor) -> CudaProgramStateBatch:
         state_input_ids = input_ids.detach().cpu()
         if self.prompt_length:
             state_input_ids = state_input_ids[:, min(self.prompt_length, state_input_ids.shape[-1]) :]
-        prefixes = self.tokenizer.batch_decode(
+        generated_prefixes = self.tokenizer.batch_decode(
             state_input_ids,
             skip_special_tokens=self.skip_special_tokens,
         )
+        prefixes = [
+            f"{self.prompt_text}{GENERATED_PREFIX_MARKER}{generated_prefix}" if self.prompt_text else generated_prefix
+            for generated_prefix in generated_prefixes
+        ]
         states = self.extractor.extract_batch(prefixes)
         return CudaProgramStateBatch.from_states(states, device=input_ids.device)
 

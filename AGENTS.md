@@ -544,10 +544,12 @@ It expands each CUDA example into multiple next-token points based on region anc
 `scem/states.py` is intentionally heuristic and cheap.  
 Do not replace it with a heavy parser unless the user explicitly wants that tradeoff.
 
-### State extractor is prefix-only
+### State extractor uses prompt context plus generated prefix
 
 The current SCEM state no longer includes manually supplied task-family or tensor-rank fields.  
-All structural features should be derived from the partial generated CUDA prefix scanned by `scem/states.py`. The extractor focuses on the active fenced code block or latest CUDA construct so benchmark prompts, harness text, and chat scaffolding do not dominate the state.
+Static/task features are derived from the prompt plus generated prefix, while dynamic code features are derived from the active fenced code block or latest CUDA construct. This preserves task spec and required signature information without letting benchmark prompts or harness text dominate prefix-state features.
+
+Current SCEM checkpoints must be retrained after this state expansion: the state now has 12 static flags, 16 prefix flags, 8 numeric features, and the state encoder emits 7 semantic memory slots instead of the older 4 coarse slots.
 
 ## Code Style and Editing Rules
 

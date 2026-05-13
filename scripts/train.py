@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scem import CudaProgramStateBatch, CudaProgramStateExtractor, SCEMConfig, SCEModule
+from scem.states import GENERATED_PREFIX_MARKER
 
 
 def parse_args():
@@ -288,7 +289,7 @@ class PrefixNextTokenDataset(Dataset):
         for token_pos, source in positions:
             prefix_end = offsets[token_pos][0] if token_pos < len(offsets) else len(text)
             prefix_end = max(target_char_start, prefix_end)
-            state_prefix = text[target_char_start:prefix_end]
+            state_prefix = text[:target_char_start] + GENERATED_PREFIX_MARKER + text[target_char_start:prefix_end]
             points.append(
                 TrainingPoint(
                     ids=ids,

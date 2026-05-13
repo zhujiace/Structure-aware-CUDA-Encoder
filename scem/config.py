@@ -23,8 +23,9 @@ class SCEMConfig:
     num_program_regions: int = 8
 
     # Static and dynamic binary state flags.
-    num_static_flags: int = 3
-    num_prefix_flags: int = 7
+    num_static_flags: int = 12
+    num_prefix_flags: int = 16
+    num_numeric_features: int = 8
 
     @classmethod
     def from_lm_config(cls, lm_config, **kwargs) -> "SCEMConfig":

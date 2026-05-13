@@ -93,6 +93,7 @@ CUDA state vocabulary parameters:
 - `num_program_regions`: program-region embedding size.
 - `num_static_flags`: number of static CUDA flags.
 - `num_prefix_flags`: number of dynamic prefix flags.
+- `num_numeric_features`: number of normalized scalar CUDA/task features.
 
 For Hugging Face models, use:
 
@@ -127,23 +128,19 @@ Use them by passing `--model-path`:
   --use-scem-prompt
 ```
 
-SCEM checkpoints are architecture- and backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same. Checkpoints produced before the removal of manually supplied task-family/tensor-rank state fields should be retrained with the current generated-prefix-only state extractor. Checkpoints trained before the prompt-stripping/code-focus state change may still load if shapes match, but should be retrained before evaluation.
+SCEM checkpoints are architecture- and backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same. Checkpoints produced before the removal of manually supplied task-family/tensor-rank state fields should be retrained with the current generated-prefix-only state extractor. Checkpoints trained before the prompt/task-aware state expansion and 7-slot state encoder are not compatible with the current SCEM architecture and must be retrained.
 
 ## CUDA State Extraction
 
-`scem/states.py` currently uses a lightweight heuristic prefix scanner, not a full CUDA parser. During generation, SCEM strips the fixed prompt/chat input before state extraction, then focuses on the active fenced code block or latest CUDA construct so task text and harness scaffolding do not dominate the state.
+`scem/states.py` currently uses a lightweight heuristic scanner, not a full CUDA parser. During generation, SCEM keeps the fixed prompt/chat input as task context, while dynamic prefix features focus on the active fenced code block or latest CUDA construct so harness scaffolding does not dominate code-state features.
 
 It extracts:
 
 - current program region
-- whether a guard may be needed
-- whether shared memory may be needed
-- whether synchronization may be needed
-- whether index expressions have appeared
-- whether a guard appears open
-- whether shared memory has appeared
-- whether `__syncthreads()` has appeared
-- whether write-back has started
+- task/static requirements such as guard, shared memory, synchronization, reduction, atomic, texture, multidimensional indexing, and math needs
+- prompt format facts such as task/input/output spec presence and harness-kernel-only mode
+- prefix facts such as index usage, guard state, shared memory, synchronization, write-back, required kernel name, loops, atomics, device helpers, and statement stability
+- normalized scalar features such as brace depth, code length, line count, signature argument counts, pointer/scalar argument counts, and output-reference count
 - brace/statement stability
 
 Current program regions:
