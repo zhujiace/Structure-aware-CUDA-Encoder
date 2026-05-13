@@ -40,6 +40,9 @@ scripts/
   train.py
   utils.py
 
+utils/
+  build_cudabench_pollution.py
+
 external/CUDABench/     git submodule
 README.md
 AGENTS.md
@@ -62,6 +65,7 @@ These are first-class project files and should be kept clean and well-structured
 - `scripts/demo.py`
 - `scripts/smoke_test.py`
 - `scripts/utils.py`
+- `utils/build_cudabench_pollution.py`
 - `README.md`
 - `AGENTS.md`
 
@@ -229,6 +233,18 @@ Purpose:
 
 - Minimal structural/shape test for SCEM internals.
 
+### `utils/build_cudabench_pollution.py`
+
+Purpose:
+
+- Convert CUDABench tasks into `data/train.json`-style records for controlled contamination experiments.
+- Default mode is harness-aligned: the input prompt matches `scripts/harness_eval.py`, and the output is the reference `__global__` kernel from `bench.cu` wrapped in one cpp block.
+- Default outputs are `data/train_harness.json`, `data/cudabench.json`, and `data/train_cudabench.json`.
+- `data/train_harness.json` is converted from `data/train.json` by extracting each standalone answer's `__global__` kernel and fixed `main` into a harness-style prompt/answer pair.
+- `data/train_cudabench.json` is the harness-style fusion of `data/train_harness.json` plus `data/cudabench.json`; do not rebuild it from standalone `data/train.json` directly.
+- Optionally writes a manifest via `--manifest` to preview the `train.py --val-ratio --seed` raw-record validation split. Do not write the manifest under `data/` unless the user asks.
+- Use the combined file with `scripts/train.py --val-ratio` so validation records stay out of the training split.
+
 ### `scripts/utils.py`
 
 Purpose:
@@ -250,6 +266,7 @@ Each helper should have a clear responsibility.
   scripts/train.py \
   scripts/eval.py \
   scripts/harness_eval.py \
+  utils/build_cudabench_pollution.py \
   scripts/demo.py \
   scripts/smoke_test.py
 ```
@@ -554,7 +571,8 @@ After any meaningful script change, run at least:
 
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python -B -m py_compile \
-  scripts/utils.py scripts/train.py scripts/eval.py scripts/harness_eval.py scripts/demo.py scripts/smoke_test.py
+  scripts/utils.py scripts/train.py scripts/eval.py scripts/harness_eval.py \
+  utils/build_cudabench_pollution.py scripts/demo.py scripts/smoke_test.py
 ```
 
 Then run the relevant entrypoint help or smoke command.
@@ -564,6 +582,7 @@ Examples:
 - changed training: run `scripts/train.py --help`
 - changed standalone evaluation: run `scripts/eval.py --help`
 - changed harness evaluation: run `scripts/harness_eval.py --help`
+- changed CUDABench pollution conversion: run `utils/build_cudabench_pollution.py --help`
 - changed demo path: run `scripts/demo.py --help`
 - changed SCEM core: run `scripts/smoke_test.py`
 
