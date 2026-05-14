@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
+import torch.distributed as dist
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torch.nn import functional as F
@@ -699,6 +700,39 @@ def make_optimizer_and_scheduler(args, scem, dataloader, stage: str, accelerator
     return optimizer, scheduler, total_steps
 
 
+def log_initial_validation(
+    model,
+    scem,
+    extractor,
+    args,
+    accelerator: Accelerator,
+    logger: Optional[TrainingRunLogger],
+    pretrain_val_loader,
+    pretrain_scheduler,
+    adapt_val_loader,
+    adapt_scheduler,
+) -> None:
+    validation_runs = [
+        ("pretrain", pretrain_val_loader, pretrain_scheduler),
+        ("adapt", adapt_val_loader, adapt_scheduler),
+    ]
+    for stage_name, val_loader, scheduler in validation_runs:
+        if val_loader is None:
+            continue
+        val_loss = evaluate_validation(model, scem, val_loader, extractor, args, accelerator)
+        lr = scheduler.get_last_lr()[0] if scheduler is not None else None
+        accelerator.print(f"{stage_name} initial step=0 val_loss={val_loss:.4f}")
+        if logger is not None:
+            logger.append(
+                event=f"{stage_name}_initial_validation",
+                epoch=None,
+                step=0,
+                val_loss=val_loss,
+                lr=lr,
+                update_plot=True,
+            )
+
+
 def main():
     args = parse_args()
     mixed_precision = args.mixed_precision if torch.cuda.is_available() else "no"
@@ -791,6 +825,18 @@ def main():
         adapt_val_loader = prepared[offset]
 
     extractor = CudaProgramStateExtractor()
+    log_initial_validation(
+        model=model,
+        scem=scem,
+        extractor=extractor,
+        args=args,
+        accelerator=accelerator,
+        logger=train_logger,
+        pretrain_val_loader=pretrain_val_loader,
+        pretrain_scheduler=pretrain_scheduler,
+        adapt_val_loader=adapt_val_loader,
+        adapt_scheduler=adapt_scheduler,
+    )
     global_step, _best1, _best_step1, _final1 = train_stage(
         "pretrain",
         model,
@@ -823,6 +869,8 @@ def main():
     )
     if train_logger is not None:
         train_logger.finish(global_step, best_step2, best2, final2)
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
