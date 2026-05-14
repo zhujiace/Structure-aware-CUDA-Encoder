@@ -32,8 +32,16 @@ def parse_args():
     parser.add_argument("--model-path", default="./models/Qwen3.5-0.8B")
     parser.add_argument("--train-file", required=True, help="JSONL file with text, prompt/completion, or messages.")
     parser.add_argument("--output-dir", default="./checkpoints/scem")
-    parser.add_argument("--train-output-dir", default="train_outputs", help="Directory for training logs, metrics, summaries, and optional loss plots.")
-    parser.add_argument("--train-run-name", default=None, help="Optional name for the subdirectory under --train-output-dir.")
+    parser.add_argument(
+        "--train-output-dir",
+        default="train_outputs",
+        help="Directory for training logs, metrics, summaries, and optional loss plots.",
+    )
+    parser.add_argument(
+        "--train-run-name",
+        default=None,
+        help="Optional name for the run subdirectory under --train-output-dir/<model-name>.",
+    )
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--min-prefix-length", type=int, default=16)
     parser.add_argument("--skip-overlength", action="store_true", help="Skip examples longer than --max-length instead of truncating them.")
@@ -457,7 +465,8 @@ class TrainingRunLogger:
     ]
 
     def __init__(self, args, train_points: int, val_points: int, total_steps: int):
-        base = Path(args.train_output_dir)
+        model_label = slugify(Path(args.model_path).name)
+        base = Path(args.train_output_dir) / model_label
         run_name = args.train_run_name or f"{slugify(Path(args.output_dir).name)}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
         self.path = base / run_name
         self.path.mkdir(parents=True, exist_ok=True)
@@ -471,6 +480,7 @@ class TrainingRunLogger:
         self.records: List[Dict[str, Any]] = []
         self.summary: Dict[str, Any] = {
             "run_name": run_name,
+            "model_label": model_label,
             "output_dir": args.output_dir,
             "train_output_dir": str(self.path),
             "train_points": train_points,

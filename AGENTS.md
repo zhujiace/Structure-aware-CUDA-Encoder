@@ -38,6 +38,7 @@ scripts/
   harness_eval.py
   smoke_test.py
   train.py
+  train_two_stage.py
   utils.py
 
 utils/
@@ -149,6 +150,17 @@ Use that interpreter when running commands in documentation or validation:
 
 All user-facing entrypoints live in `scripts/`.
 
+## Output Naming Convention
+
+Use short, experiment-focused names for future checkpoint, train-output, and eval run directories.
+
+- Do not repeat the backbone name in run names by default.
+- `eval_outputs/<model-name>/...` already groups evaluation outputs by backbone.
+- `train_outputs/<model-name>/...` also groups training logs by backbone.
+- Training runs record the full model path in `training_args.json`, so run names can focus on method, data, and key settings.
+- Prefer names like `struct7_2stage_harness`, `struct7_cudapollute_ep3`, or `lora_scem_harness`.
+- Avoid long names like `scem_qwen35_4b_scem_struct7_train_cudabench_2gpu_ep3` unless the user explicitly asks for backbone-identifying names or multiple backbones are intentionally mixed in one parent directory.
+
 ### `scripts/train.py`
 
 Purpose:
@@ -167,10 +179,26 @@ Important behavior:
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
 - Supports `--val-ratio` with `--var-ratio` as a compatibility alias; validation is split by raw records and used for validation loss tracking.
 - Training now saves regular `step-*` checkpoints, `final/`, and `best/` when validation is enabled.
-- Training writes run logs under `train_outputs/<run-name>/` by default: `metrics.jsonl`, `metrics.csv`, `summary.json`, `training_args.json`, and separate plots under `figs/` when matplotlib is available.
+- Training writes run logs under `train_outputs/<model-name>/<run-name>/` by default: `metrics.jsonl`, `metrics.csv`, `summary.json`, `training_args.json`, and separate plots under `figs/` when matplotlib is available.
 - For the current `data/train.json`, `--max-length 4096` covers about 99.6% of records; `--max-length 3072 --skip-overlength` covers about 94.6% without training on truncated records.
 - Larger checkpoint output directories should use `/data/projects/scem/checkpoints/` to avoid filling the user home directory.
 - 4B and 9B LoRA training has been smoke-tested with Accelerate/DDP; current DDP duplicates the full backbone on each GPU, so it improves throughput but does not reduce per-GPU model memory.
+
+### `scripts/train_two_stage.py`
+
+Purpose:
+
+- Train SCEM in two phases without changing the backbone: dense structural warmup followed by harness adaptation.
+- Use when SCEM-only one-stage SFT appears too weak or too sparse.
+- Runs one frozen-backbone forward per raw example and gathers multiple target positions from that forward pass, making dense prefix-point training more efficient than one forward per sampled prefix.
+
+Important behavior:
+
+- Does not modify eval behavior or `scripts/train.py`.
+- Pretrain saves `<output-dir>/pretrain/scem.pt`.
+- Adapt saves `<output-dir>/adapt-best/`, `<output-dir>/best/`, and `<output-dir>/final/`.
+- Uses the same raw-record validation split for both stages via `--val-ratio` and `--seed`.
+- Currently SCEM-only; use `scripts/train.py` for LoRA experiments.
 
 ### `scripts/eval.py`
 
@@ -264,6 +292,7 @@ Each helper should have a clear responsibility.
 /home/zhujiace/anaconda3/envs/llama/bin/python -B -m py_compile \
   scripts/utils.py \
   scripts/train.py \
+  scripts/train_two_stage.py \
   scripts/eval.py \
   scripts/harness_eval.py \
   utils/build_cudabench_pollution.py \
@@ -275,6 +304,7 @@ Each helper should have a clear responsibility.
 
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/train.py --help
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/train_two_stage.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/harness_eval.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py --help
@@ -574,7 +604,7 @@ After any meaningful script change, run at least:
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python -B -m py_compile \
   scripts/utils.py scripts/train.py scripts/eval.py scripts/harness_eval.py \
-  utils/build_cudabench_pollution.py scripts/demo.py scripts/smoke_test.py
+  scripts/train_two_stage.py utils/build_cudabench_pollution.py scripts/demo.py scripts/smoke_test.py
 ```
 
 Then run the relevant entrypoint help or smoke command.
@@ -582,6 +612,7 @@ Then run the relevant entrypoint help or smoke command.
 Examples:
 
 - changed training: run `scripts/train.py --help`
+- changed two-stage training: run `scripts/train_two_stage.py --help`
 - changed standalone evaluation: run `scripts/eval.py --help`
 - changed harness evaluation: run `scripts/harness_eval.py --help`
 - changed CUDABench pollution conversion: run `utils/build_cudabench_pollution.py --help`
