@@ -34,8 +34,9 @@ You are generating CUDA kernel code for a fixed CUDABench harness.
 
 Output exactly one fenced cpp code block and nothing else. The single code block
 must contain the replacement `__global__` kernel with the requested kernel name
-and compatible parameters. If helper functions are needed, put all helpers before
-the kernel in the same code block.
+and compatible parameters, including a complete function body. A kernel
+declaration or signature without a body is invalid. If helper functions are
+needed, put all helpers before the kernel in the same code block.
 
 Do not output explanations, analysis, placeholders, `main`, host I/O, includes,
 memory allocation, cudaMemcpy calls, kernel launch code, or multiple code blocks.
@@ -219,9 +220,11 @@ the reference kernel was removed. The harness already contains headers, helper
 functions, input/output file handling, memory allocation, cudaMemcpy calls,
 kernel launch, and main().
 
-Your output must be exactly one cpp code block containing `{kernel_name}`.
+Your output must be exactly one cpp code block containing a complete
+implementation of `{kernel_name}`.
 If you need helper functions, put every helper and the kernel in that same code
 block. Do not split helpers and kernel across multiple code blocks.
+A kernel declaration or signature without a function body is invalid.
 
 Task Name:
 {task['task_name']}
@@ -254,7 +257,7 @@ replacement `__global__` kernel in the same code block.
 def extract_harness_kernel(response: str, kernel_name: str) -> Tuple[str, List[str]]:
     code = extract_code(
         response,
-        required_substrings=["__global__", kernel_name],
+        required_substrings=["__global__", kernel_name, "{"],
         preferred_substrings=[kernel_name, "__global__"],
         forbidden_substrings=["int main", "#include", "cudaMalloc", "cudaMemcpy", "read_binary", "write_binary"],
         fallback_to_best=False,
@@ -269,7 +272,53 @@ def extract_harness_kernel(response: str, kernel_name: str) -> Tuple[str, List[s
         errors.append("missing_required_kernel_name")
     if "int main" in code:
         errors.append("contains_main")
+    body_error = validate_kernel_body(code, kernel_name)
+    if body_error is not None:
+        errors.append(body_error)
+    if errors:
+        return "", errors
     return code, errors
+
+
+def validate_kernel_body(code: str, kernel_name: str) -> Optional[str]:
+    kernel_match = re.search(rf"\b__global__\b[\s\S]*?\b{re.escape(kernel_name)}\s*\(", code)
+    if kernel_match is None:
+        return "missing_required_kernel_body"
+    open_paren = code.find("(", kernel_match.end() - 1)
+    if open_paren < 0:
+        return "missing_required_kernel_body"
+    try:
+        close_paren = find_matching_delimiter(code, open_paren, "(", ")")
+    except ValueError:
+        return "incomplete_kernel_signature"
+
+    suffix = code[close_paren + 1 :]
+    brace_offset = suffix.find("{")
+    semicolon_offset = suffix.find(";")
+    if brace_offset < 0 or (semicolon_offset >= 0 and semicolon_offset < brace_offset):
+        return "missing_required_kernel_body"
+
+    open_brace = close_paren + 1 + brace_offset
+    try:
+        find_matching_brace(code, open_brace)
+    except ValueError:
+        return "incomplete_kernel_body"
+    return None
+
+
+def find_matching_delimiter(text: str, open_index: int, open_char: str, close_char: str) -> int:
+    depth = 0
+    index = open_index
+    while index < len(text):
+        char = text[index]
+        if char == open_char:
+            depth += 1
+        elif char == close_char:
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    raise ValueError("Unmatched delimiter")
 
 
 def select_eval_tasks(tasks: List[Dict[str, Any]], stride: int, limit: Optional[int]) -> List[Dict[str, Any]]:
@@ -319,7 +368,7 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
             for sample_idx in range(1, args.num_samples + 1):
                 response = generator.generate(
                     prompt,
-                    stop_required_substrings=["__global__", kernel_name],
+                    stop_required_substrings=["__global__", kernel_name, "{", "}"],
                     stop_forbidden_substrings=[
                         "int main",
                         "#include",

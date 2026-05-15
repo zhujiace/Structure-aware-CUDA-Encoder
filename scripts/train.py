@@ -778,6 +778,19 @@ def main():
     last_train_loss = None
     optimizer.zero_grad(set_to_none=True)
 
+    if val_dataloader is not None:
+        initial_val_loss = evaluate_validation(model, scem, val_dataloader, extractor, args, accelerator)
+        accelerator.print(f"initial step=0 val_loss={initial_val_loss:.4f}")
+        if train_logger is not None:
+            train_logger.append(
+                event="initial_validation",
+                epoch=None,
+                step=0,
+                val_loss=initial_val_loss,
+                lr=scheduler.get_last_lr()[0],
+                update_plot=True,
+            )
+
     for epoch in range(args.epochs):
         for local_step, batch in enumerate(dataloader):
             with accelerator.accumulate(model, scem):
