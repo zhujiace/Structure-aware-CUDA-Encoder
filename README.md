@@ -401,6 +401,19 @@ Example 4B harness baseline:
 
 If `--output-dir` is omitted, it creates a unique dated directory under `eval_outputs/<model-name>/`, similar to `scripts/eval.py`.
 
+Harness generation can run on 1-4 GPUs. With normal `python`, generation is single-process. With `accelerate launch --num_processes N`, tasks are automatically sharded across ranks, each rank writes `generated_results.rank<N>.jsonl`, and rank 0 merges the shards into the standard `generated_results.jsonl` format before evaluation. Add `--generate-only` to stop after generation and skip compile/functionality checks:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 \
+/home/zhujiace/anaconda3/envs/llama/bin/accelerate launch --num_processes 4 scripts/harness_eval.py \
+  --model-path /data/projects/scem/models/Qwen3.5-4B \
+  --level level1_prompt \
+  --task-stride 5 \
+  --num-samples 3 \
+  --generate-only \
+  --output-dir eval_outputs/Qwen3.5-4B/level1_harness_parallel_gen
+```
+
 ## Training
 
 Training is supervised next-token fine-tuning over the adjusted logits:

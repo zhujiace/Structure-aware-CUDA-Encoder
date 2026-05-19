@@ -335,8 +335,16 @@ class LocalGenerator:
     ):
         self.max_new_tokens = max_new_tokens
         self.system_prompt = compose_system_prompt(system_prompt, use_scem_prompt=use_scem_prompt)
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if self.device == "cuda" else torch.float32
+        if torch.cuda.is_available():
+            local_rank = os.environ.get("LOCAL_RANK")
+            if local_rank is not None:
+                torch.cuda.set_device(int(local_rank))
+                self.device = f"cuda:{local_rank}"
+            else:
+                self.device = "cuda"
+        else:
+            self.device = "cpu"
+        dtype = torch.float16 if self.device.startswith("cuda") else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
         self.model = AutoModelForCausalLM.from_pretrained(model_path, dtype=dtype)
         if lora_checkpoint:

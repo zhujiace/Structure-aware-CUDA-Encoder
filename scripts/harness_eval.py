@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import re
 import shutil
 import sys
@@ -52,6 +53,21 @@ class HarnessParts:
     main_function: str
 
 
+@dataclass(frozen=True)
+class DistributedContext:
+    rank: int
+    local_rank: int
+    world_size: int
+
+    @property
+    def is_distributed(self) -> bool:
+        return self.world_size > 1
+
+    @property
+    def is_main(self) -> bool:
+        return self.rank == 0
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Evaluate kernel-only generation by inserting generated kernels into CUDABench bench.cu harnesses."
@@ -79,6 +95,7 @@ def parse_args():
     parser.add_argument("--compile-timeout", type=int, default=60)
     parser.add_argument("--run-timeout", type=int, default=60)
     parser.add_argument("--keep-temp", action="store_true")
+    parser.add_argument("--generate-only", action="store_true", help="Generate generated_results.jsonl and skip compile/functionality evaluation.")
     parser.add_argument("--trust-generated", action="store_true", help="Skip generation and evaluate an existing JSONL.")
     parser.add_argument("--results-jsonl", default=None, help="Existing generated results JSONL for --trust-generated.")
     return parser.parse_args()
@@ -330,7 +347,97 @@ def select_eval_tasks(tasks: List[Dict[str, Any]], stride: int, limit: Optional[
     return selected
 
 
-def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpers) -> None:
+def get_distributed_context() -> DistributedContext:
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return DistributedContext(rank=0, local_rank=0, world_size=1)
+    return DistributedContext(
+        rank=int(os.environ.get("RANK", "0")),
+        local_rank=int(os.environ.get("LOCAL_RANK", "0")),
+        world_size=world_size,
+    )
+
+
+def init_distributed_if_needed(context: DistributedContext) -> None:
+    if not context.is_distributed:
+        return
+    import torch.distributed as dist
+
+    if dist.is_available() and not dist.is_initialized():
+        dist.init_process_group(backend="gloo")
+
+
+def distributed_barrier(context: DistributedContext) -> None:
+    if not context.is_distributed:
+        return
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
+def distributed_broadcast_value(context: DistributedContext, value: Optional[str]) -> str:
+    if not context.is_distributed:
+        if value is None:
+            raise ValueError("Cannot broadcast a missing value outside distributed mode.")
+        return value
+    import torch.distributed as dist
+
+    values = [value]
+    dist.broadcast_object_list(values, src=0)
+    if values[0] is None:
+        raise ValueError("Distributed broadcast returned no value.")
+    return str(values[0])
+
+
+def generated_shard_path(output_path: Path, rank: int) -> Path:
+    return output_path.with_name(f"{output_path.stem}.rank{rank}{output_path.suffix}")
+
+
+def generated_shard_paths(output_path: Path, world_size: int) -> List[Path]:
+    return [generated_shard_path(output_path, rank) for rank in range(world_size)]
+
+
+def load_done_ids_from_paths(paths: List[Path]) -> set[int]:
+    done: set[int] = set()
+    for path in paths:
+        done.update(load_done_ids(path))
+    return done
+
+
+def merge_generated_shards(tasks: List[Dict[str, Any]], output_path: Path, shard_paths: List[Path]) -> int:
+    records_by_id: Dict[int, Dict[str, Any]] = {}
+    for path in [output_path, *shard_paths]:
+        if not path.exists():
+            continue
+        for record in load_generated_results(path):
+            try:
+                task_id = int(record["id"])
+            except Exception:
+                continue
+            if task_id not in records_by_id:
+                records_by_id[task_id] = record
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with open(output_path, "w", encoding="utf-8") as handle:
+        for task in tasks:
+            record = records_by_id.get(int(task["id"]))
+            if record is None:
+                continue
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            written += 1
+    return written
+
+
+def generate_results(
+    args,
+    tasks: List[Dict[str, Any]],
+    output_path: Path,
+    helpers,
+    done_paths: Optional[List[Path]] = None,
+    log_prefix: str = "",
+) -> None:
     generator = LocalGenerator(
         model_path=args.model_path,
         max_new_tokens=args.max_new_tokens,
@@ -342,13 +449,13 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
         alpha=args.alpha,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    done_ids = load_done_ids(output_path)
+    done_ids = load_done_ids_from_paths(done_paths or [output_path])
 
     with open(output_path, "a", encoding="utf-8") as handle:
         for index, task in enumerate(tasks, start=1):
             task_id = int(task["id"])
             if task_id in done_ids:
-                print(f"[GEN {index}/{len(tasks)}] id={task_id} skip existing")
+                print(f"{log_prefix}[GEN {index}/{len(tasks)}] id={task_id} skip existing")
                 continue
             prompt = build_harness_prompt(task, args.level, args.gpu_model)
             parts = extract_harness_parts(task["bench.cu"])
@@ -363,7 +470,7 @@ def generate_results(args, tasks: List[Dict[str, Any]], output_path: Path, helpe
                 "kernel_signature": parts.kernel_signature,
                 "eval_mode": "harness_kernel_only",
             }
-            print(f"[GEN {index}/{len(tasks)}] id={task_id} {task['task_name']}")
+            print(f"{log_prefix}[GEN {index}/{len(tasks)}] id={task_id} {task['task_name']}")
             kernel_name = kernel_name_from_signature(parts.kernel_signature)
             for sample_idx in range(1, args.num_samples + 1):
                 response = generator.generate(
@@ -541,6 +648,11 @@ def evaluate_results(args, tasks_by_id: Dict[int, Dict[str, Any]], results_path:
 
 def main():
     args = parse_args()
+    if args.trust_generated and args.generate_only:
+        raise ValueError("--generate-only cannot be combined with --trust-generated.")
+
+    distributed = get_distributed_context()
+    init_distributed_if_needed(distributed)
     cudabench_root, dataset_path = resolve_cudabench_paths(args.cudabench_root, args.dataset)
     helpers = load_cudabench_helpers(cudabench_root)
     tasks = select_eval_tasks(
@@ -549,15 +661,47 @@ def main():
         limit=args.limit,
     )
     tasks_by_id = {int(task["id"]): task for task in tasks}
-    output_dir = Path(args.output_dir) if args.output_dir else build_auto_output_dir(args)
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    elif distributed.is_distributed:
+        output_dir_value = str(build_auto_output_dir(args)) if distributed.is_main else None
+        output_dir = Path(distributed_broadcast_value(distributed, output_dir_value))
+    else:
+        output_dir = build_auto_output_dir(args)
     args.output_dir = str(output_dir)
     results_path = Path(args.results_jsonl) if args.results_jsonl else output_dir / "generated_results.jsonl"
     eval_path = output_dir / "eval_results.jsonl"
 
     if not args.trust_generated:
-        generate_results(args, tasks, results_path, helpers)
+        if distributed.is_distributed:
+            shard_paths = generated_shard_paths(results_path, distributed.world_size)
+            shard_path = shard_paths[distributed.rank]
+            shard_tasks = tasks[distributed.rank :: distributed.world_size]
+            generate_results(
+                args,
+                shard_tasks,
+                shard_path,
+                helpers,
+                done_paths=[results_path, *shard_paths],
+                log_prefix=f"[rank {distributed.rank}/{distributed.world_size}] ",
+            )
+            distributed_barrier(distributed)
+            if not distributed.is_main:
+                return
+            written = merge_generated_shards(tasks, results_path, shard_paths)
+            print(f"Merged {written}/{len(tasks)} generated records into {results_path}")
+        else:
+            generate_results(args, tasks, results_path, helpers)
+
+        if args.generate_only:
+            print(f"Generation complete. Results written to {results_path}")
+            return
     elif not results_path.exists():
-        raise FileNotFoundError(f"--trust-generated requires an existing results file: {results_path}")
+        if distributed.is_main:
+            raise FileNotFoundError(f"--trust-generated requires an existing results file: {results_path}")
+        return
+    elif distributed.is_distributed and not distributed.is_main:
+        return
 
     summary = evaluate_results(args, tasks_by_id, results_path, eval_path, helpers)
     print("\nHarness evaluation summary")

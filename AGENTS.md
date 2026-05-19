@@ -241,6 +241,8 @@ Important behavior:
 - Does not replace `scripts/eval.py`; standalone and harness metrics should be interpreted separately.
 - Intended to reduce noise from missing `main`/I/O boilerplate and better isolate CUDA kernel generation ability.
 - If `--output-dir` is omitted, creates a unique dated directory under `eval_outputs/<model-name>/`; same-day duplicates get `_02`, `_03`, ... suffixes.
+- Supports `--generate-only` to write `generated_results.jsonl` without running compile/functionality checks.
+- If launched with `accelerate launch --num_processes N`, generation is automatically sharded across ranks and merged by rank 0 into the same `generated_results.jsonl` format as single-process generation. Non-main ranks do not run the detection phase.
 
 ### `scripts/demo.py`
 
