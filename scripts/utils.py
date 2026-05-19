@@ -504,12 +504,18 @@ def evaluate_functionality(
     run_script_as_function,
 ) -> bool:
     os.makedirs(os.path.join(work_dir, "data"), exist_ok=True)
-    ok, _ = run_script_as_function(task.get("gen.py", ""), work_dir=work_dir)
+    try:
+        ok, _ = run_script_as_function(task.get("gen.py", ""), work_dir=work_dir)
+    except SystemExit:
+        return False
     if not ok:
         return False
     if not run_executable(executable_path, work_dir, timeout):
         return False
-    ok, compare_out = run_script_as_function(task.get("compare.py", ""), work_dir=work_dir)
+    try:
+        ok, compare_out = run_script_as_function(task.get("compare.py", ""), work_dir=work_dir)
+    except SystemExit:
+        return False
     if not ok:
         return False
     return "F" not in compare_out
