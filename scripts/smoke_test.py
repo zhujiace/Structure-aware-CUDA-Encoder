@@ -29,7 +29,7 @@ def main():
 
     with torch.no_grad():
         output = scem(hidden, batch, return_attention=True)
-        adjusted_logits = scem.apply_bias(logits, hidden, batch, alpha=0.3)
+        adjusted_logits = scem.apply_bias(logits, hidden, batch)
 
     print("bias:", tuple(output.bias.shape))
     print("memory:", tuple(output.memory.shape))

@@ -3,7 +3,7 @@
 SCEM is a lightweight structure-aware module for text-to-CUDA generation. It does not replace the backbone code LLM. Instead, it reads the current decoder hidden state and a compact CUDA prefix state, then produces a vocabulary-sized logits bias:
 
 ```text
-z_final = z_lm + alpha * b_scem
+z_final = z_lm + b_scem
 ```
 
 The current repository uses local Qwen3.5-0.8B as the default integration target, while the core SCEM module is model-agnostic. Larger local Qwen3.5 backbones are stored under `/data/projects/scem/models/` to avoid filling the user home directory.
@@ -51,7 +51,7 @@ At each decoding step:
 4. Run cross-attention from `h_t` to `M_t`.
 5. Fuse `[h_t; c_t]` with an MLP.
 6. Produce a vocab-sized bias `b_t`.
-7. Add `alpha * b_t` to the backbone logits.
+7. Add `b_t` to the backbone logits.
 
 The implemented form is:
 
@@ -60,10 +60,10 @@ M_t = {e_1, ..., e_k}
 c_t = CrossAttention(h_t, M_t)
 u_t = MLP([h_t; c_t])
 b_t = W_b u_t
-z_final = z_lm + alpha * b_t
+z_final = z_lm + b_t
 ```
 
-The `[h_t; c_t]` operation is feature fusion, not a residual connection. The residual-style correction happens at logits level through `z_lm + alpha * b_t`.
+The `[h_t; c_t]` operation is feature fusion, not a residual connection. The residual-style correction happens at logits level through `z_lm + b_t`. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
 
 ## SCEM Config Parameters
 
@@ -194,8 +194,7 @@ Example: enable SCEM with a checkpoint:
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py \
   --task-id 0 \
   --enable-scem \
-  --scem-checkpoint ./checkpoints/scem_qwen35/step-1000/scem.pt \
-  --alpha 0.3
+  --scem-checkpoint ./checkpoints/scem_qwen35/step-1000/scem.pt
 ```
 
 Example: keep the external CUDABench task prompt unchanged but enable SCEM-side system constraints:
@@ -218,7 +217,7 @@ Important arguments:
 - `--use-scem-prompt`: enable SCEM-side supplemental system constraints without editing the external CUDABench prompt template.
 - `--enable-scem`: enable SCEM during generation.
 - `--scem-checkpoint`: trained `scem.pt` path. If omitted while `--enable-scem` is set, the script uses an untrained zero-effect SCEM module.
-- `--alpha`: SCEM bias strength.
+- `--alpha`: optional SCEM bias scale for ablations; default `1.0`.
 - `--keep-temp`: keep compile/run temporary directories for debugging.
 
 Qwen3.5 generation defaults in the script:
@@ -303,7 +302,6 @@ After training, pass a SCEM checkpoint:
   --scem-checkpoint ./checkpoints/scem_qwen35/step-1000/scem.pt \
   --level level3_prompt \
   --num-samples 1 \
-  --alpha 0.3 \
   --run-name scem_step1000
 ```
 
@@ -419,10 +417,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 Training is supervised next-token fine-tuning over the adjusted logits:
 
 ```text
-loss = CE(z_lm + alpha * b_scem, next_token)
+loss = CE(z_lm + b_scem, next_token)
 ```
 
-By default, the backbone LM is frozen and only SCEM is trained. This is the recommended first stage, especially for future 7B+ models.
+By default, the backbone LM is frozen and only SCEM is trained. This is the recommended first stage, especially for future 7B+ models. The optional `--alpha` implementation parameter defaults to `1.0`; regular experiments should leave it unset.
 
 Optional LoRA training is available:
 
@@ -663,7 +661,7 @@ Optimization:
 
 SCEM:
 
-- `--alpha`: training-time SCEM bias scale.
+- `--alpha`: optional SCEM bias scale for ablations; default `1.0`.
 - `--bias-rank`: low-rank vocab bias rank.
 
 Backbone:

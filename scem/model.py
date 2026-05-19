@@ -161,7 +161,7 @@ class SCEModule(nn.Module):
         state: CudaProgramStateBatch,
         alpha: float = 1.0,
     ) -> torch.Tensor:
-        """Return ``z_t^LM + alpha * b_t`` for decoding-time use."""
+        """Return LM logits plus the optionally scaled SCEM bias."""
 
         output = self.forward(hidden_state=hidden_state, state=state)
         return lm_logits + alpha * output.bias.to(dtype=lm_logits.dtype)

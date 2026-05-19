@@ -566,6 +566,10 @@ This was a deliberate choice for simplicity, cost, and consistency with the next
 
 SCEM bias is injected through decoding-time logits processing, not by deeply rewriting the model forward path.
 
+### Alpha is only an optional implementation scale
+
+Training and evaluation default `--alpha` to `1.0`, and normal commands should leave it unset. Treat SCEM as predicting the bias magnitude directly; use `--alpha` only for explicit ablation/debug experiments.
+
 ### Region-aware multi-point SFT is intentional
 
 Training no longer samples only one random point per example.  

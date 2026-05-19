@@ -54,7 +54,7 @@ def parse_args():
         default=1,
         help="Evaluate every Nth task after --start-index. Use 5 to sample one kernel from each five-task group.",
     )
-    parser.add_argument("--alpha", type=float, default=0.3)
+    parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--use-scem-prompt", action="store_true", help="Enable SCEM-side supplemental system constraints without modifying external/CUDABench.")
     parser.add_argument("--compile-timeout", type=int, default=60)
     parser.add_argument("--run-timeout", type=int, default=60)

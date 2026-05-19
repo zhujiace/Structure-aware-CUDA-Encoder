@@ -331,7 +331,7 @@ class LocalGenerator:
         enable_scem: bool = False,
         scem_checkpoint: Optional[str] = None,
         lora_checkpoint: Optional[str] = None,
-        alpha: float = 0.3,
+        alpha: float = 1.0,
     ):
         self.max_new_tokens = max_new_tokens
         self.system_prompt = compose_system_prompt(system_prompt, use_scem_prompt=use_scem_prompt)

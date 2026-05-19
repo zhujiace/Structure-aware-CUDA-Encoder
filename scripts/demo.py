@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument("--enable-scem", action="store_true")
     parser.add_argument("--scem-checkpoint", default=None)
     parser.add_argument("--lora-checkpoint", default=None)
-    parser.add_argument("--alpha", type=float, default=0.3)
+    parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--compile-timeout", type=int, default=60)
     parser.add_argument("--run-timeout", type=int, default=60)
     parser.add_argument("--keep-temp", action="store_true")
