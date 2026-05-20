@@ -65,6 +65,22 @@ def parse_args():
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--bias-rank", type=int, default=64)
+    parser.add_argument("--bias-arch", choices=["concat", "state_gated_delta"], default="state_gated_delta")
+    parser.add_argument("--state-gate-scale", type=float, default=1.0)
+    parser.add_argument("--state-shift-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--state-contrastive-weight",
+        type=float,
+        default=0.2,
+        help="Weight for the true-state vs corrupted-state margin loss. Set 0 to disable.",
+    )
+    parser.add_argument("--state-contrastive-margin", type=float, default=0.01)
+    parser.add_argument(
+        "--state-contrastive-mode",
+        choices=["none", "zero_all", "shuffle", "both"],
+        default="zero_all",
+        help="Corrupted state used by the contrastive loss. shuffle falls back to zero_all for batch size 1.",
+    )
     parser.add_argument("--save-steps", type=int, default=500)
     parser.add_argument("--log-steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
@@ -597,6 +613,64 @@ def split_train_validation_records(
     return train_records, val_records
 
 
+def zero_state_batch_like(state_batch: CudaProgramStateBatch) -> CudaProgramStateBatch:
+    return CudaProgramStateBatch(
+        program_region=torch.zeros_like(state_batch.program_region),
+        static_flags=torch.zeros_like(state_batch.static_flags),
+        prefix_flags=torch.zeros_like(state_batch.prefix_flags),
+        numeric_features=torch.zeros_like(state_batch.numeric_features),
+    )
+
+
+def shuffled_state_batch_like(state_batch: CudaProgramStateBatch) -> CudaProgramStateBatch:
+    if state_batch.program_region.size(0) < 2:
+        return zero_state_batch_like(state_batch)
+    return CudaProgramStateBatch(
+        program_region=state_batch.program_region.roll(shifts=1, dims=0),
+        static_flags=state_batch.static_flags.roll(shifts=1, dims=0),
+        prefix_flags=state_batch.prefix_flags.roll(shifts=1, dims=0),
+        numeric_features=state_batch.numeric_features.roll(shifts=1, dims=0),
+    )
+
+
+def corrupted_state_batches(state_batch: CudaProgramStateBatch, mode: str) -> List[CudaProgramStateBatch]:
+    if mode == "none":
+        return []
+    if mode == "zero_all":
+        return [zero_state_batch_like(state_batch)]
+    if mode == "shuffle":
+        return [shuffled_state_batch_like(state_batch)]
+    if mode == "both":
+        return [zero_state_batch_like(state_batch), shuffled_state_batch_like(state_batch)]
+    raise ValueError(f"Unsupported state contrastive mode: {mode}")
+
+
+def compute_state_conditioned_loss(
+    scem,
+    last_hidden: torch.Tensor,
+    last_logits: torch.Tensor,
+    labels: torch.LongTensor,
+    state_batch: CudaProgramStateBatch,
+    args,
+) -> torch.Tensor:
+    scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
+    adjusted_logits = last_logits + args.alpha * scem_bias
+    true_ce = F.cross_entropy(adjusted_logits, labels)
+    if args.state_contrastive_weight <= 0.0 or args.state_contrastive_mode == "none":
+        return true_ce
+
+    margins = []
+    for corrupted_state in corrupted_state_batches(state_batch, args.state_contrastive_mode):
+        corrupted_bias = scem(last_hidden, corrupted_state).bias.to(dtype=last_logits.dtype)
+        corrupted_logits = last_logits + args.alpha * corrupted_bias
+        corrupted_ce = F.cross_entropy(corrupted_logits, labels)
+        margins.append(F.relu(args.state_contrastive_margin + true_ce - corrupted_ce))
+    if not margins:
+        return true_ce
+    contrastive_loss = torch.stack(margins).mean()
+    return true_ce + args.state_contrastive_weight * contrastive_loss
+
+
 def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaProgramStateExtractor, args, accelerator: Accelerator):
     input_ids = batch.input_ids.to(accelerator.device)
     attention_mask = batch.attention_mask.to(accelerator.device)
@@ -621,9 +695,7 @@ def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaProgramSta
             )
     last_hidden = outputs.hidden_states[-1][:, -1, :]
     last_logits = outputs.logits[:, -1, :]
-    scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
-    adjusted_logits = last_logits + args.alpha * scem_bias
-    return F.cross_entropy(adjusted_logits, labels)
+    return compute_state_conditioned_loss(scem, last_hidden, last_logits, labels, state_batch, args)
 
 
 @torch.no_grad()
@@ -677,7 +749,13 @@ def main():
     if not args.use_lora:
         model.eval()
 
-    scem_config = SCEMConfig.from_lm_config(get_lm_config(model), bias_rank=args.bias_rank)
+    scem_config = SCEMConfig.from_lm_config(
+        get_lm_config(model),
+        bias_rank=args.bias_rank,
+        bias_arch=args.bias_arch,
+        state_gate_scale=args.state_gate_scale,
+        state_shift_scale=args.state_shift_scale,
+    )
     scem = SCEModule(scem_config).to(dtype=next(model.parameters()).dtype)
     scem.train()
 

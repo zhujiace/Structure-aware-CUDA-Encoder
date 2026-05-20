@@ -49,21 +49,24 @@ At each decoding step:
 2. Decode the generated assistant/code prefix and extract CUDA program state.
 3. Encode the CUDA state into memory slots `M_t`.
 4. Run cross-attention from `h_t` to `M_t`.
-5. Fuse `[h_t; c_t]` with an MLP.
-6. Produce a vocab-sized bias `b_t`.
+5. Let the CUDA context gate and shift a low-rank hidden-state correction.
+6. Produce a vocab-sized bias `b_t` from the gated low-rank correction.
 7. Add `b_t` to the backbone logits.
 
-The implemented form is:
+The default implemented form is:
 
 ```text
 M_t = {e_1, ..., e_k}
 c_t = CrossAttention(h_t, M_t)
-u_t = MLP([h_t; c_t])
+r_t = tanh(W_h LN(h_t))
+g_t = 1 + s_g tanh(W_g LN(c_t))
+d_t = s_d tanh(W_d LN(c_t))
+u_t = LN(r_t * g_t + d_t)
 b_t = W_b u_t
 z_final = z_lm + b_t
 ```
 
-The `[h_t; c_t]` operation is feature fusion, not a residual connection. The residual-style correction happens at logits level through `z_lm + b_t`. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
+This `state_gated_delta` architecture replaced the earlier direct concat fusion because `[h_t; c_t]` allowed a strong hidden-only shortcut. The previous concat architecture remains available as `bias_arch="concat"` for loading older checkpoints and explicit ablations. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
 
 ## SCEM Config Parameters
 
@@ -88,6 +91,9 @@ Bias head parameters:
 
 - `bias_rank`: low-rank bottleneck for vocab bias. `None` uses a full `fusion_dim -> vocab_size` projection.
 - `max_bias`: clamps bias magnitude with `tanh` to avoid overwhelming the backbone logits.
+- `bias_arch`: `state_gated_delta` by default; `concat` preserves the older direct `[h_t; c_t]` fusion.
+- `state_gate_scale`: scale for the CUDA-context gate in `state_gated_delta`.
+- `state_shift_scale`: scale for the CUDA-context shift in `state_gated_delta`.
 
 CUDA state vocabulary parameters:
 
@@ -663,6 +669,21 @@ SCEM:
 
 - `--alpha`: optional SCEM bias scale for ablations; default `1.0`.
 - `--bias-rank`: low-rank vocab bias rank.
+- `--bias-arch`: SCEM bias head architecture. Default `state_gated_delta`; use `concat` only for ablations.
+- `--state-gate-scale`: scale for state-conditioned multiplicative gating.
+- `--state-shift-scale`: scale for state-conditioned additive low-rank shift.
+- `--state-contrastive-weight`: weight for the true-state vs corrupted-state margin loss. Set `0` to disable.
+- `--state-contrastive-margin`: required CE margin between true and corrupted state.
+- `--state-contrastive-mode`: corrupted-state source: `zero_all`, `shuffle`, `both`, or `none`.
+
+The default SCEM training objective is now state-sensitive:
+
+```text
+loss = CE(z_lm + b(true_state), y)
+     + lambda * max(0, margin + CE_true - CE_corrupted)
+```
+
+`zero_all` is the default corrupted state because common training commands use batch size 1, where in-batch shuffling would otherwise be ineffective.
 
 Backbone:
 

@@ -17,6 +17,9 @@ class SCEMConfig:
     dropout: float = 0.0
     bias_rank: Optional[int] = 64
     max_bias: Optional[float] = 10.0
+    bias_arch: str = "state_gated_delta"
+    state_gate_scale: float = 1.0
+    state_shift_scale: float = 0.1
 
     # CUDA state vocab sizes. Keep these small and explicit so training data can
     # serialize states as compact integer IDs.

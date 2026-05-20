@@ -292,6 +292,10 @@ def load_scem_checkpoint(path: str, model_config, device: str, dtype: torch.dtyp
     if not isinstance(config, SCEMConfig):
         config = SCEMConfig.from_lm_config(model_config)
     state_dict = checkpoint["state_dict"]
+    if any(key.startswith("fusion.") or key.startswith("bias_head.") for key in state_dict):
+        config.bias_arch = "concat"
+    elif any(key.startswith("state_gated_bias_head.") for key in state_dict):
+        config.bias_arch = "state_gated_delta"
     deprecated_keys = [
         key
         for key in state_dict

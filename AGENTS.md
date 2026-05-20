@@ -570,6 +570,12 @@ SCEM bias is injected through decoding-time logits processing, not by deeply rew
 
 Training and evaluation default `--alpha` to `1.0`, and normal commands should leave it unset. Treat SCEM as predicting the bias magnitude directly; use `--alpha` only for explicit ablation/debug experiments.
 
+### Default SCEM head is state-gated
+
+The default SCEM bias head is now `state_gated_delta`, where CUDA context gates and shifts a low-rank hidden-state correction before vocab projection. The older direct concat fusion remains available as `--bias-arch concat` for ablations and old-checkpoint compatibility.
+
+Training defaults include a true-state vs corrupted-state margin term (`--state-contrastive-weight`, `--state-contrastive-margin`, `--state-contrastive-mode`) so SCEM is explicitly pressured to make the correct CUDA state outperform a corrupted state. Use `--state-contrastive-weight 0` only for ablation/debug runs.
+
 ### Region-aware multi-point SFT is intentional
 
 Training no longer samples only one random point per example.  

@@ -88,6 +88,51 @@ class SCEMBiasHead(nn.Module):
         return bias
 
 
+class SCEMStateGatedBiasHead(nn.Module):
+    """State-conditioned low-rank bias head.
+
+    The LM hidden state proposes a low-rank correction, while CUDA state context
+    gates and shifts that correction before projection to vocabulary logits.
+    This makes the state path control the final bias instead of being a small
+    slice in a direct hidden/context concatenation.
+    """
+
+    def __init__(self, config: SCEMConfig):
+        super().__init__()
+        self.config = config
+        self.rank_dim = config.bias_rank or config.fusion_dim
+        self.state_gate_scale = getattr(config, "state_gate_scale", 1.0)
+        self.state_shift_scale = getattr(config, "state_shift_scale", 0.1)
+        self.hidden_rank = nn.Sequential(
+            nn.LayerNorm(config.lm_hidden_size),
+            nn.Linear(config.lm_hidden_size, self.rank_dim),
+            nn.Tanh(),
+        )
+        self.gate_norm = nn.LayerNorm(config.context_dim)
+        self.gate_proj = nn.Linear(config.context_dim, self.rank_dim)
+        self.shift_norm = nn.LayerNorm(config.context_dim)
+        self.shift_proj = nn.Linear(config.context_dim, self.rank_dim)
+        self.rank_norm = nn.LayerNorm(self.rank_dim)
+        self.vocab_proj = nn.Linear(self.rank_dim, config.vocab_size)
+
+        nn.init.zeros_(self.gate_proj.weight)
+        nn.init.zeros_(self.gate_proj.bias)
+        nn.init.zeros_(self.shift_proj.weight)
+        nn.init.zeros_(self.shift_proj.bias)
+        nn.init.zeros_(self.vocab_proj.weight)
+        nn.init.zeros_(self.vocab_proj.bias)
+
+    def forward(self, hidden_state: torch.Tensor, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_rank = self.hidden_rank(hidden_state)
+        gate = 1.0 + self.state_gate_scale * torch.tanh(self.gate_proj(self.gate_norm(context)))
+        shift = self.state_shift_scale * torch.tanh(self.shift_proj(self.shift_norm(context)))
+        rank = self.rank_norm(hidden_rank * gate + shift)
+        bias = self.vocab_proj(rank)
+        if self.config.max_bias is not None:
+            bias = self.config.max_bias * torch.tanh(bias / self.config.max_bias)
+        return bias, rank
+
+
 class SCEModule(nn.Module):
     """Structure-aware CUDA Encoding Module.
 
@@ -99,6 +144,7 @@ class SCEModule(nn.Module):
     def __init__(self, config: SCEMConfig):
         super().__init__()
         self.config = config
+        self.bias_arch = getattr(config, "bias_arch", "concat")
         self.state_encoder = CudaStateMemoryEncoder(config)
         self.hidden_norm = nn.LayerNorm(config.lm_hidden_size)
         self.query_projection = nn.Linear(config.lm_hidden_size, config.context_dim)
@@ -109,15 +155,23 @@ class SCEModule(nn.Module):
             dropout=config.dropout,
             batch_first=True,
         )
-        self.fusion = nn.Sequential(
-            nn.Linear(config.lm_hidden_size + config.context_dim, config.fusion_hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.fusion_hidden_dim, config.fusion_dim),
-            nn.SiLU(),
-            nn.LayerNorm(config.fusion_dim),
-        )
-        self.bias_head = SCEMBiasHead(config)
+        if self.bias_arch == "concat":
+            self.fusion = nn.Sequential(
+                nn.Linear(config.lm_hidden_size + config.context_dim, config.fusion_hidden_dim),
+                nn.SiLU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(config.fusion_hidden_dim, config.fusion_dim),
+                nn.SiLU(),
+                nn.LayerNorm(config.fusion_dim),
+            )
+            self.bias_head = SCEMBiasHead(config)
+            self.state_gated_bias_head = None
+        elif self.bias_arch == "state_gated_delta":
+            self.fusion = None
+            self.bias_head = None
+            self.state_gated_bias_head = SCEMStateGatedBiasHead(config)
+        else:
+            raise ValueError(f"Unsupported SCEM bias_arch: {self.bias_arch}")
 
     def forward(
         self,
@@ -143,8 +197,11 @@ class SCEModule(nn.Module):
             average_attn_weights=False,
         )
         context = context.squeeze(1)
-        fused = self.fusion(torch.cat([hidden_state, context], dim=-1))
-        bias = self.bias_head(fused)
+        if self.bias_arch == "concat":
+            fused = self.fusion(torch.cat([hidden_state, context], dim=-1))
+            bias = self.bias_head(fused)
+        else:
+            bias, fused = self.state_gated_bias_head(hidden_state, context)
         return SCEMBiasOutput(
             bias=bias,
             context=context,

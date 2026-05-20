@@ -29,6 +29,7 @@ from train import (  # noqa: E402
     REGION_ANCHORS,
     TrainingRunLogger,
     configure_backbone,
+    compute_state_conditioned_loss,
     get_lm_config,
     resolve_model_dtype,
     save_checkpoint,
@@ -73,6 +74,22 @@ def parse_args():
     parser.add_argument("--grad-accum-steps", type=int, default=32)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--bias-rank", type=int, default=64)
+    parser.add_argument("--bias-arch", choices=["concat", "state_gated_delta"], default="state_gated_delta")
+    parser.add_argument("--state-gate-scale", type=float, default=1.0)
+    parser.add_argument("--state-shift-scale", type=float, default=0.1)
+    parser.add_argument(
+        "--state-contrastive-weight",
+        type=float,
+        default=0.2,
+        help="Weight for the true-state vs corrupted-state margin loss. Set 0 to disable.",
+    )
+    parser.add_argument("--state-contrastive-margin", type=float, default=0.01)
+    parser.add_argument(
+        "--state-contrastive-mode",
+        choices=["none", "zero_all", "shuffle", "both"],
+        default="zero_all",
+        help="Corrupted state used by the contrastive loss. shuffle falls back to zero_all for one point.",
+    )
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--save-steps", type=int, default=100)
@@ -456,9 +473,7 @@ def compute_batch_loss(model, scem, batch: MultiPointBatch, extractor, args, acc
         )
     last_hidden = outputs.hidden_states[-1][point_batch_indices, point_positions, :]
     last_logits = outputs.logits[point_batch_indices, point_positions, :]
-    scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
-    adjusted_logits = last_logits + args.alpha * scem_bias
-    return F.cross_entropy(adjusted_logits, labels), labels.numel()
+    return compute_state_conditioned_loss(scem, last_hidden, last_logits, labels, state_batch, args), labels.numel()
 
 
 @torch.no_grad()
@@ -749,7 +764,13 @@ def main():
     model = configure_backbone(model, args)
     model.eval()
 
-    scem_config = SCEMConfig.from_lm_config(get_lm_config(model), bias_rank=args.bias_rank)
+    scem_config = SCEMConfig.from_lm_config(
+        get_lm_config(model),
+        bias_rank=args.bias_rank,
+        bias_arch=args.bias_arch,
+        state_gate_scale=args.state_gate_scale,
+        state_shift_scale=args.state_shift_scale,
+    )
     scem = SCEModule(scem_config).to(dtype=next(model.parameters()).dtype)
     if args.init_scem_checkpoint:
         load_scem_weights(args.init_scem_checkpoint, scem)

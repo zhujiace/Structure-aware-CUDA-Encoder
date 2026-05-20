@@ -129,8 +129,13 @@ def load_scem(label: str, path: Path, model, dtype: torch.dtype, device: torch.d
     if "state_dict" not in checkpoint:
         raise ValueError(f"{path} does not contain a SCEM state_dict")
     config = config_from_checkpoint(checkpoint, model)
+    state_dict = checkpoint["state_dict"]
+    if any(key.startswith("fusion.") or key.startswith("bias_head.") for key in state_dict):
+        config.bias_arch = "concat"
+    elif any(key.startswith("state_gated_bias_head.") for key in state_dict):
+        config.bias_arch = "state_gated_delta"
     scem = SCEModule(config).to(device=device, dtype=dtype)
-    missing, unexpected = scem.load_state_dict(checkpoint["state_dict"], strict=False)
+    missing, unexpected = scem.load_state_dict(state_dict, strict=False)
     if missing or unexpected:
         raise ValueError(f"{label} checkpoint mismatch: missing={missing}, unexpected={unexpected}")
     scem.eval()
