@@ -5,7 +5,7 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -364,7 +364,7 @@ def init_distributed_if_needed(context: DistributedContext) -> None:
     import torch.distributed as dist
 
     if dist.is_available() and not dist.is_initialized():
-        dist.init_process_group(backend="gloo")
+        dist.init_process_group(backend="gloo", timeout=timedelta(hours=12))
 
 
 def distributed_barrier(context: DistributedContext) -> None:

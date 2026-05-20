@@ -7,6 +7,7 @@ archive/
 checkpoints/
 eval_outputs/
 train_outputs/
+analysis_outputs/
 temp/
 utils/
-paper.md
+paper/
