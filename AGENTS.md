@@ -161,6 +161,28 @@ Use short, experiment-focused names for future checkpoint, train-output, and eva
 - Prefer names like `struct7_2stage_harness`, `struct7_cudapollute_ep3`, or `lora_scem_harness`.
 - Avoid long names like `scem_qwen35_4b_scem_struct7_train_cudabench_2gpu_ep3` unless the user explicitly asks for backbone-identifying names or multiple backbones are intentionally mixed in one parent directory.
 
+## Experiment Logging Requirement
+
+Every experiment must be recorded manually under `report/` before or immediately after launch. This applies to training, evaluation, analysis, inspection, ablation, debugging experiments, and any other run whose results may later be compared.
+
+- Use one log file per date, named with short date format: `report/YYMMDD.log` (for example, `report/260520.log`).
+- Append a new entry for each experiment.
+- Include at minimum:
+  - an ARS-compatible `Material Passport` block when the experiment may later be used in research writing or comparison
+  - experiment date
+  - experiment name
+  - experiment type (`training`, `evaluation`, `analysis`, etc.)
+  - experiment purpose
+  - tmux session or execution context when applicable
+  - key inputs/checkpoints/models/data
+  - output directories
+  - complete command exactly as launched
+  - notable notes, including failures/restarts or environment fixes
+- Descriptive fields such as purpose, notes, and experiment context should be written in Chinese for readability unless the user asks otherwise.
+- For ARS-compatible entries, use `Origin Skill: experiment-agent`; choose `Origin Mode` as `plan`, `run`, or `validate` according to the artifact being recorded. `Verification Status` is an artifact-level label (`UNVERIFIED`, `ANALYZED`, or `VERIFIED`), not a live run-status field.
+- Prefer the ARS-style section layout: `Material Passport`, `Experiment Overview`, `Setup`, `Inputs`, `Expected Outputs`, `Monitoring Configuration`, `Analysis Plan`, and `Notes`.
+- Do not implement this as code or a logging hook. Keep it as an agent workflow requirement and write the log entry directly.
+
 ### `scripts/train.py`
 
 Purpose:
