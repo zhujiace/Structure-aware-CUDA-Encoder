@@ -23,7 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scem import CudaProgramStateBatch, CudaProgramStateExtractor, SCEMConfig, SCEModule
+from scem import CudaASTGraphBatch, CudaASTGraphExtractor, SCEMConfig, SCEModule
 from scem.states import GENERATED_PREFIX_MARKER
 
 
@@ -65,9 +65,20 @@ def parse_args():
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--bias-rank", type=int, default=64)
-    parser.add_argument("--bias-arch", choices=["concat", "state_gated_delta"], default="state_gated_delta")
     parser.add_argument("--state-gate-scale", type=float, default=1.0)
-    parser.add_argument("--state-shift-scale", type=float, default=0.1)
+    parser.add_argument("--state-shift-scale", type=float, default=1.0)
+    parser.add_argument("--ast-dim", type=int, default=256)
+    parser.add_argument("--ast-ffn-dim", type=int, default=512)
+    parser.add_argument("--ast-layers", type=int, default=3)
+    parser.add_argument("--ast-heads", type=int, default=4)
+    parser.add_argument("--ast-memory-slots", type=int, default=16)
+    parser.add_argument("--ast-node-type-vocab-size", type=int, default=4096)
+    parser.add_argument("--ast-edge-type-vocab-size", type=int, default=1024)
+    parser.add_argument("--ast-text-vocab-size", type=int, default=8192)
+    parser.add_argument("--ast-max-nodes", type=int, default=512)
+    parser.add_argument("--ast-max-edges", type=int, default=2048)
+    parser.add_argument("--ast-max-depth", type=int, default=64)
+    parser.add_argument("--ast-max-child-index", type=int, default=64)
     parser.add_argument(
         "--state-contrastive-weight",
         type=float,
@@ -436,6 +447,39 @@ def resolve_model_dtype(args, accelerator: Accelerator) -> torch.dtype:
     return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
 
+def build_scem_config(args, lm_config) -> SCEMConfig:
+    return SCEMConfig.from_lm_config(
+        lm_config,
+        bias_rank=args.bias_rank,
+        state_gate_scale=args.state_gate_scale,
+        state_shift_scale=args.state_shift_scale,
+        ast_dim=args.ast_dim,
+        ast_ffn_dim=args.ast_ffn_dim,
+        ast_layers=args.ast_layers,
+        ast_heads=args.ast_heads,
+        ast_memory_slots=args.ast_memory_slots,
+        ast_node_type_vocab_size=args.ast_node_type_vocab_size,
+        ast_edge_type_vocab_size=args.ast_edge_type_vocab_size,
+        ast_text_vocab_size=args.ast_text_vocab_size,
+        ast_max_nodes=args.ast_max_nodes,
+        ast_max_edges=args.ast_max_edges,
+        ast_max_depth=args.ast_max_depth,
+        ast_max_child_index=args.ast_max_child_index,
+    )
+
+
+def build_ast_extractor(args) -> CudaASTGraphExtractor:
+    return CudaASTGraphExtractor(
+        max_nodes=args.ast_max_nodes,
+        max_edges=args.ast_max_edges,
+        node_type_vocab_size=args.ast_node_type_vocab_size,
+        edge_type_vocab_size=args.ast_edge_type_vocab_size,
+        text_vocab_size=args.ast_text_vocab_size,
+        max_depth=args.ast_max_depth,
+        max_child_index=args.ast_max_child_index,
+    )
+
+
 def save_checkpoint(
     output_dir: str,
     scem: SCEModule,
@@ -613,27 +657,17 @@ def split_train_validation_records(
     return train_records, val_records
 
 
-def zero_state_batch_like(state_batch: CudaProgramStateBatch) -> CudaProgramStateBatch:
-    return CudaProgramStateBatch(
-        program_region=torch.zeros_like(state_batch.program_region),
-        static_flags=torch.zeros_like(state_batch.static_flags),
-        prefix_flags=torch.zeros_like(state_batch.prefix_flags),
-        numeric_features=torch.zeros_like(state_batch.numeric_features),
-    )
+def zero_state_batch_like(state_batch: CudaASTGraphBatch) -> CudaASTGraphBatch:
+    return state_batch.zero_like()
 
 
-def shuffled_state_batch_like(state_batch: CudaProgramStateBatch) -> CudaProgramStateBatch:
-    if state_batch.program_region.size(0) < 2:
+def shuffled_state_batch_like(state_batch: CudaASTGraphBatch) -> CudaASTGraphBatch:
+    if state_batch.batch_size < 2:
         return zero_state_batch_like(state_batch)
-    return CudaProgramStateBatch(
-        program_region=state_batch.program_region.roll(shifts=1, dims=0),
-        static_flags=state_batch.static_flags.roll(shifts=1, dims=0),
-        prefix_flags=state_batch.prefix_flags.roll(shifts=1, dims=0),
-        numeric_features=state_batch.numeric_features.roll(shifts=1, dims=0),
-    )
+    return state_batch.roll(shifts=1, dims=0)
 
 
-def corrupted_state_batches(state_batch: CudaProgramStateBatch, mode: str) -> List[CudaProgramStateBatch]:
+def corrupted_state_batches(state_batch: CudaASTGraphBatch, mode: str) -> List[CudaASTGraphBatch]:
     if mode == "none":
         return []
     if mode == "zero_all":
@@ -650,7 +684,7 @@ def compute_state_conditioned_loss(
     last_hidden: torch.Tensor,
     last_logits: torch.Tensor,
     labels: torch.LongTensor,
-    state_batch: CudaProgramStateBatch,
+    state_batch: CudaASTGraphBatch,
     args,
 ) -> torch.Tensor:
     scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
@@ -671,12 +705,11 @@ def compute_state_conditioned_loss(
     return true_ce + args.state_contrastive_weight * contrastive_loss
 
 
-def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaProgramStateExtractor, args, accelerator: Accelerator):
+def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaASTGraphExtractor, args, accelerator: Accelerator):
     input_ids = batch.input_ids.to(accelerator.device)
     attention_mask = batch.attention_mask.to(accelerator.device)
     labels = batch.labels.to(accelerator.device)
-    states = extractor.extract_batch(batch.state_prefix_texts)
-    state_batch = CudaProgramStateBatch.from_states(states, device=accelerator.device)
+    state_batch = extractor.extract_batch(batch.state_prefix_texts, device=accelerator.device)
 
     if args.use_lora:
         outputs = model(
@@ -699,7 +732,7 @@ def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaProgramSta
 
 
 @torch.no_grad()
-def evaluate_validation(model, scem, dataloader, extractor: CudaProgramStateExtractor, args, accelerator: Accelerator) -> float:
+def evaluate_validation(model, scem, dataloader, extractor: CudaASTGraphExtractor, args, accelerator: Accelerator) -> float:
     if dataloader is None:
         raise ValueError("Validation dataloader is not available")
 
@@ -749,13 +782,7 @@ def main():
     if not args.use_lora:
         model.eval()
 
-    scem_config = SCEMConfig.from_lm_config(
-        get_lm_config(model),
-        bias_rank=args.bias_rank,
-        bias_arch=args.bias_arch,
-        state_gate_scale=args.state_gate_scale,
-        state_shift_scale=args.state_shift_scale,
-    )
+    scem_config = build_scem_config(args, get_lm_config(model))
     scem = SCEModule(scem_config).to(dtype=next(model.parameters()).dtype)
     scem.train()
 
@@ -815,7 +842,7 @@ def main():
     total_steps = max(1, total_steps)
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-    extractor = CudaProgramStateExtractor()
+    extractor = build_ast_extractor(args)
     train_logger = None
     if accelerator.is_main_process:
         train_logger = TrainingRunLogger(

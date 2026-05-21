@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -5,7 +7,7 @@ import torch
 from torch import nn
 
 from .config import SCEMConfig
-from .states import CudaProgramStateBatch
+from .states import CudaASTGraphBatch
 
 
 @dataclass
@@ -17,116 +19,178 @@ class SCEMBiasOutput:
     attention_weights: Optional[torch.Tensor] = None
 
 
-class CudaStateMemoryEncoder(nn.Module):
-    """Encode static CUDA facts and dynamic prefix facts into memory slots."""
+class EdgeAwareGraphTransformerLayer(nn.Module):
+    """Graph transformer layer whose attention depends on typed AST edges."""
+
+    def __init__(self, config: SCEMConfig):
+        super().__init__()
+        if config.ast_dim % config.ast_heads != 0:
+            raise ValueError("ast_dim must be divisible by ast_heads")
+        self.dim = config.ast_dim
+        self.num_heads = config.ast_heads
+        self.head_dim = config.ast_dim // config.ast_heads
+        self.q_proj = nn.Linear(config.ast_dim, config.ast_dim)
+        self.k_proj = nn.Linear(config.ast_dim, config.ast_dim)
+        self.v_proj = nn.Linear(config.ast_dim, config.ast_dim)
+        self.out_proj = nn.Linear(config.ast_dim, config.ast_dim)
+        self.edge_bias = nn.Embedding(config.ast_edge_type_vocab_size, config.ast_heads)
+        self.edge_value = nn.Embedding(config.ast_edge_type_vocab_size, config.ast_dim)
+        self.norm1 = nn.LayerNorm(config.ast_dim)
+        self.norm2 = nn.LayerNorm(config.ast_dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(config.ast_dim, config.ast_ffn_dim),
+            nn.SiLU(),
+            nn.Dropout(config.ast_dropout),
+            nn.Linear(config.ast_ffn_dim, config.ast_dim),
+        )
+        self.dropout = nn.Dropout(config.ast_dropout)
+
+    def forward(self, hidden: torch.Tensor, graph: CudaASTGraphBatch) -> torch.Tensor:
+        batch_size, node_count, _ = hidden.shape
+        query = self._split_heads(self.q_proj(hidden))
+        key = self._split_heads(self.k_proj(hidden))
+        value = self._split_heads(self.v_proj(hidden))
+
+        edge_sources = graph.edge_sources.clamp(min=0, max=max(node_count - 1, 0))
+        edge_targets = graph.edge_targets.clamp(min=0, max=max(node_count - 1, 0))
+        edge_mask = (
+            graph.edge_mask
+            & graph.node_mask.gather(1, edge_sources)
+            & graph.node_mask.gather(1, edge_targets)
+        )
+
+        attended = hidden.new_zeros(batch_size, node_count, self.dim)
+        if bool(edge_mask.any()):
+            src_key = self._gather_nodes(key, edge_sources)
+            dst_query = self._gather_nodes(query, edge_targets)
+            src_value = self._gather_nodes(value, edge_sources)
+            edge_bias = self.edge_bias(graph.edge_type_ids).to(dtype=hidden.dtype)
+            scores = (dst_query * src_key).sum(dim=-1) / (self.head_dim**0.5)
+            scores = scores + edge_bias
+
+            valid_scores = scores[edge_mask]
+            valid_targets = edge_targets[edge_mask]
+            valid_batch = torch.arange(batch_size, device=hidden.device).unsqueeze(1).expand_as(edge_targets)[edge_mask]
+            group_ids = valid_batch * node_count + valid_targets
+            group_count = batch_size * node_count
+
+            max_per_group = hidden.new_full((group_count, self.num_heads), -torch.inf)
+            expanded_groups = group_ids.unsqueeze(-1).expand(-1, self.num_heads)
+            max_per_group.scatter_reduce_(0, expanded_groups, valid_scores, reduce="amax", include_self=True)
+            weights = torch.exp(valid_scores - max_per_group[group_ids])
+            sum_per_group = hidden.new_zeros(group_count, self.num_heads)
+            sum_per_group.scatter_add_(0, expanded_groups, weights)
+            weights = weights / sum_per_group[group_ids].clamp_min(1e-8)
+
+            edge_value = self.edge_value(graph.edge_type_ids[edge_mask]).to(dtype=hidden.dtype)
+            edge_value = edge_value.view(-1, self.num_heads, self.head_dim)
+            messages = (src_value[edge_mask] + edge_value) * weights.unsqueeze(-1)
+            flat_out = hidden.new_zeros(group_count, self.num_heads, self.head_dim)
+            scatter_index = group_ids.view(-1, 1, 1).expand(-1, self.num_heads, self.head_dim)
+            flat_out.scatter_add_(0, scatter_index, messages)
+            attended = flat_out.view(batch_size, node_count, self.dim)
+
+        hidden = self.norm1(hidden + self.dropout(self.out_proj(attended)))
+        hidden = self.norm2(hidden + self.dropout(self.ffn(hidden)))
+        return hidden * graph.node_mask.unsqueeze(-1).to(dtype=hidden.dtype)
+
+    def _split_heads(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch_size, node_count, _ = tensor.shape
+        return tensor.view(batch_size, node_count, self.num_heads, self.head_dim)
+
+    @staticmethod
+    def _gather_nodes(tensor: torch.Tensor, indices: torch.LongTensor) -> torch.Tensor:
+        _, _, num_heads, head_dim = tensor.shape
+        gather_index = indices.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, num_heads, head_dim)
+        return tensor.gather(1, gather_index)
+
+
+class CudaASTGraphEncoder(nn.Module):
+    """Encode full CUDA AST graphs into memory tokens for hidden-state cross attention."""
 
     def __init__(self, config: SCEMConfig):
         super().__init__()
         self.config = config
-        self.program_region = nn.Embedding(config.num_program_regions, config.state_dim)
-
-        self.static_requirements = nn.Linear(8, config.state_dim)
-        self.task_format = nn.Linear(4, config.state_dim)
-        self.prefix_indexing = nn.Linear(4, config.state_dim)
-        self.prefix_memory_write = nn.Linear(5, config.state_dim)
-        self.prefix_kernel_control = nn.Linear(7, config.state_dim)
-        self.numeric_features = nn.Linear(config.num_numeric_features, config.state_dim)
-
-        self.slot_projection = nn.Sequential(
-            nn.LayerNorm(config.state_dim),
-            nn.Linear(config.state_dim, config.memory_dim),
+        self.node_type_embedding = nn.Embedding(config.ast_node_type_vocab_size, config.ast_dim, padding_idx=0)
+        self.node_text_embedding = nn.Embedding(config.ast_text_vocab_size, config.ast_dim, padding_idx=0)
+        self.depth_embedding = nn.Embedding(config.ast_max_depth + 1, config.ast_dim)
+        self.child_index_embedding = nn.Embedding(config.ast_max_child_index + 1, config.ast_dim)
+        self.flag_projection = nn.Linear(3, config.ast_dim)
+        self.position_projection = nn.Linear(3, config.ast_dim)
+        self.input_norm = nn.LayerNorm(config.ast_dim)
+        self.layers = nn.ModuleList([EdgeAwareGraphTransformerLayer(config) for _ in range(config.ast_layers)])
+        self.memory_queries = nn.Parameter(torch.randn(config.ast_memory_slots, config.ast_dim) * 0.02)
+        self.memory_attention = nn.MultiheadAttention(
+            embed_dim=config.ast_dim,
+            num_heads=config.ast_heads,
+            dropout=config.ast_dropout,
+            batch_first=True,
+        )
+        self.memory_projection = nn.Sequential(
+            nn.LayerNorm(config.ast_dim),
+            nn.Linear(config.ast_dim, config.memory_dim),
             nn.SiLU(),
             nn.Linear(config.memory_dim, config.memory_dim),
         )
 
-    def forward(self, state: CudaProgramStateBatch) -> torch.Tensor:
-        dtype = self.static_requirements.weight.dtype
-        static_flags = state.static_flags.to(dtype=dtype)
-        prefix_flags = state.prefix_flags.to(dtype=dtype)
-        numeric_features = state.numeric_features.to(dtype=dtype)
-        slots = torch.stack(
-            [
-                self.program_region(state.program_region),
-                self.static_requirements(static_flags[:, :8]),
-                self.task_format(static_flags[:, 8:12]),
-                self.prefix_indexing(prefix_flags[:, :4]),
-                self.prefix_memory_write(prefix_flags[:, [4, 5, 6, 7, 12]]),
-                self.prefix_kernel_control(prefix_flags[:, [8, 9, 10, 11, 13, 14, 15]]),
-                self.numeric_features(numeric_features),
-            ],
-            dim=1,
+    def forward(self, graph: CudaASTGraphBatch) -> torch.Tensor:
+        dtype = self.flag_projection.weight.dtype
+        node_type = self.node_type_embedding(graph.node_type_ids)
+        node_text = self.node_text_embedding(graph.node_text_ids)
+        depth = self.depth_embedding(graph.node_depths.clamp(max=self.config.ast_max_depth))
+        child_index = self.child_index_embedding(graph.node_child_indices.clamp(max=self.config.ast_max_child_index))
+        flags = self.flag_projection(graph.node_flags.to(dtype=dtype))
+        positions = self.position_projection(graph.node_positions.to(dtype=dtype))
+        hidden = self.input_norm(node_type + node_text + depth + child_index + flags + positions)
+        hidden = hidden * graph.node_mask.unsqueeze(-1).to(dtype=hidden.dtype)
+        for layer in self.layers:
+            hidden = layer(hidden, graph)
+
+        queries = self.memory_queries.unsqueeze(0).expand(hidden.shape[0], -1, -1).to(dtype=hidden.dtype)
+        memory, _ = self.memory_attention(
+            query=queries,
+            key=hidden,
+            value=hidden,
+            key_padding_mask=~graph.node_mask,
+            need_weights=False,
         )
-        return self.slot_projection(slots)
-
-
-class SCEMBiasHead(nn.Module):
-    """Project fused structure representation into vocabulary-sized bias."""
-
-    def __init__(self, config: SCEMConfig):
-        super().__init__()
-        self.config = config
-        if config.bias_rank is None:
-            self.proj = nn.Linear(config.fusion_dim, config.vocab_size)
-            nn.init.zeros_(self.proj.weight)
-            nn.init.zeros_(self.proj.bias)
-            self.rank_proj = None
-            self.vocab_proj = None
-        else:
-            self.rank_proj = nn.Linear(config.fusion_dim, config.bias_rank)
-            self.vocab_proj = nn.Linear(config.bias_rank, config.vocab_size)
-            nn.init.zeros_(self.vocab_proj.weight)
-            nn.init.zeros_(self.vocab_proj.bias)
-            self.proj = None
-
-    def forward(self, fused: torch.Tensor) -> torch.Tensor:
-        if self.proj is not None:
-            bias = self.proj(fused)
-        else:
-            bias = self.vocab_proj(torch.tanh(self.rank_proj(fused)))
-        if self.config.max_bias is not None:
-            bias = self.config.max_bias * torch.tanh(bias / self.config.max_bias)
-        return bias
+        return self.memory_projection(memory)
 
 
 class SCEMStateGatedBiasHead(nn.Module):
-    """State-conditioned low-rank bias head.
-
-    The LM hidden state proposes a low-rank correction, while CUDA state context
-    gates and shifts that correction before projection to vocabulary logits.
-    This makes the state path control the final bias instead of being a small
-    slice in a direct hidden/context concatenation.
-    """
+    """State-conditioned low-rank vocabulary bias head."""
 
     def __init__(self, config: SCEMConfig):
         super().__init__()
         self.config = config
-        self.rank_dim = config.bias_rank or config.fusion_dim
-        self.state_gate_scale = getattr(config, "state_gate_scale", 1.0)
-        self.state_shift_scale = getattr(config, "state_shift_scale", 0.1)
+        self.rank_dim = config.bias_rank or config.context_dim
+        self.state_gate_scale = config.state_gate_scale
+        self.state_shift_scale = config.state_shift_scale
         self.hidden_rank = nn.Sequential(
             nn.LayerNorm(config.lm_hidden_size),
             nn.Linear(config.lm_hidden_size, self.rank_dim),
             nn.Tanh(),
         )
-        self.gate_norm = nn.LayerNorm(config.context_dim)
-        self.gate_proj = nn.Linear(config.context_dim, self.rank_dim)
-        self.shift_norm = nn.LayerNorm(config.context_dim)
-        self.shift_proj = nn.Linear(config.context_dim, self.rank_dim)
+        self.state_rank = nn.Sequential(
+            nn.LayerNorm(config.context_dim),
+            nn.Linear(config.context_dim, self.rank_dim),
+            nn.Tanh(),
+        )
+        self.gate = nn.Sequential(
+            nn.LayerNorm(config.context_dim),
+            nn.Linear(config.context_dim, self.rank_dim),
+            nn.Tanh(),
+        )
         self.rank_norm = nn.LayerNorm(self.rank_dim)
         self.vocab_proj = nn.Linear(self.rank_dim, config.vocab_size)
-
-        nn.init.zeros_(self.gate_proj.weight)
-        nn.init.zeros_(self.gate_proj.bias)
-        nn.init.zeros_(self.shift_proj.weight)
-        nn.init.zeros_(self.shift_proj.bias)
         nn.init.zeros_(self.vocab_proj.weight)
         nn.init.zeros_(self.vocab_proj.bias)
 
     def forward(self, hidden_state: torch.Tensor, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_rank = self.hidden_rank(hidden_state)
-        gate = 1.0 + self.state_gate_scale * torch.tanh(self.gate_proj(self.gate_norm(context)))
-        shift = self.state_shift_scale * torch.tanh(self.shift_proj(self.shift_norm(context)))
-        rank = self.rank_norm(hidden_rank * gate + shift)
+        state_rank = self.state_rank(context)
+        state_gate = 1.0 + self.state_gate_scale * self.gate(context)
+        rank = self.rank_norm(hidden_rank * state_gate + self.state_shift_scale * state_rank)
         bias = self.vocab_proj(rank)
         if self.config.max_bias is not None:
             bias = self.config.max_bias * torch.tanh(bias / self.config.max_bias)
@@ -134,18 +198,12 @@ class SCEMStateGatedBiasHead(nn.Module):
 
 
 class SCEModule(nn.Module):
-    """Structure-aware CUDA Encoding Module.
-
-    Given the current decoder hidden state ``h_t`` and CUDA prefix state memory
-    ``M_t``, it returns a vocabulary-sized bias ``b_t`` that can be added to
-    the backbone language-model logits.
-    """
+    """Structure-aware CUDA Encoding Module with AST graph state."""
 
     def __init__(self, config: SCEMConfig):
         super().__init__()
         self.config = config
-        self.bias_arch = getattr(config, "bias_arch", "concat")
-        self.state_encoder = CudaStateMemoryEncoder(config)
+        self.state_encoder = CudaASTGraphEncoder(config)
         self.hidden_norm = nn.LayerNorm(config.lm_hidden_size)
         self.query_projection = nn.Linear(config.lm_hidden_size, config.context_dim)
         self.memory_projection = nn.Linear(config.memory_dim, config.context_dim)
@@ -155,28 +213,12 @@ class SCEModule(nn.Module):
             dropout=config.dropout,
             batch_first=True,
         )
-        if self.bias_arch == "concat":
-            self.fusion = nn.Sequential(
-                nn.Linear(config.lm_hidden_size + config.context_dim, config.fusion_hidden_dim),
-                nn.SiLU(),
-                nn.Dropout(config.dropout),
-                nn.Linear(config.fusion_hidden_dim, config.fusion_dim),
-                nn.SiLU(),
-                nn.LayerNorm(config.fusion_dim),
-            )
-            self.bias_head = SCEMBiasHead(config)
-            self.state_gated_bias_head = None
-        elif self.bias_arch == "state_gated_delta":
-            self.fusion = None
-            self.bias_head = None
-            self.state_gated_bias_head = SCEMStateGatedBiasHead(config)
-        else:
-            raise ValueError(f"Unsupported SCEM bias_arch: {self.bias_arch}")
+        self.bias_head = SCEMStateGatedBiasHead(config)
 
     def forward(
         self,
         hidden_state: torch.Tensor,
-        state: CudaProgramStateBatch,
+        state: CudaASTGraphBatch,
         return_attention: bool = False,
     ) -> SCEMBiasOutput:
         if hidden_state.dim() == 3:
@@ -197,11 +239,7 @@ class SCEModule(nn.Module):
             average_attn_weights=False,
         )
         context = context.squeeze(1)
-        if self.bias_arch == "concat":
-            fused = self.fusion(torch.cat([hidden_state, context], dim=-1))
-            bias = self.bias_head(fused)
-        else:
-            bias, fused = self.state_gated_bias_head(hidden_state, context)
+        bias, fused = self.bias_head(hidden_state, context)
         return SCEMBiasOutput(
             bias=bias,
             context=context,
@@ -215,10 +253,8 @@ class SCEModule(nn.Module):
         self,
         lm_logits: torch.Tensor,
         hidden_state: torch.Tensor,
-        state: CudaProgramStateBatch,
+        state: CudaASTGraphBatch,
         alpha: float = 1.0,
     ) -> torch.Tensor:
-        """Return LM logits plus the optionally scaled SCEM bias."""
-
         output = self.forward(hidden_state=hidden_state, state=state)
         return lm_logits + alpha * output.bias.to(dtype=lm_logits.dtype)

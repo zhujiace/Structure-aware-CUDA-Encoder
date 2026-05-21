@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file is for future coding agents working in this repository. It captures the current stable project state as of 2026-05-11 and is intended to make the next session pick up quickly without rediscovering local conventions.
+This file is for future coding agents working in this repository. It captures the current stable project state as of 2026-05-21 and is intended to make the next session pick up quickly without rediscovering local conventions.
 
 ## Scope
 
@@ -15,8 +15,9 @@ Current stage:
 - CUDABench evaluation script is in place.
 - Kernel-only harness evaluation script is in place.
 - Training data and benchmark are available locally.
-- SCEM smoke training has produced `scem.pt` checkpoints for 4B/9B paths, but checkpoints produced before the prefix-only state extractor change should be retrained before further evaluation.
-- A first 4B SCEM-only 3-GPU run produced `/data/projects/scem/checkpoints/scem_qwen35_4b_scem_only_3gpu/step-724/scem.pt`, but it used the older state layout with manually supplied task-family/tensor-rank fields and should not be treated as compatible with current code.
+- SCEM state extraction is now based on `tree_sitter_cuda` AST graphs and an edge-aware Graph Transformer. Older heuristic-state checkpoints are incompatible and must be retrained.
+- A small AST-SCEM smoke run completed at `/tmp/scem_ast_train_smoke/final/scem.pt`; it only validates code paths and should not be treated as a performance checkpoint.
+- A first 4B SCEM-only 3-GPU run produced `/data/projects/scem/checkpoints/scem_qwen35_4b_scem_only_3gpu/step-724/scem.pt`, but it used an older state layout and should not be treated as compatible with current code.
 - Baseline experiments have been run for `Qwen3.5-0.8B` and `Qwen3.5-4B`; the 0.8B result is effectively unusable, while 4B has measurable but still low CUDA generation accuracy.
 
 ## Repository Structure
@@ -158,8 +159,8 @@ Use short, experiment-focused names for future checkpoint, train-output, and eva
 - `eval_outputs/<model-name>/...` already groups evaluation outputs by backbone.
 - `train_outputs/<model-name>/...` also groups training logs by backbone.
 - Training runs record the full model path in `training_args.json`, so run names can focus on method, data, and key settings.
-- Prefer names like `struct7_2stage_harness`, `struct7_cudapollute_ep3`, or `lora_scem_harness`.
-- Avoid long names like `scem_qwen35_4b_scem_struct7_train_cudabench_2gpu_ep3` unless the user explicitly asks for backbone-identifying names or multiple backbones are intentionally mixed in one parent directory.
+- Prefer names like `astgraph_2stage_harness`, `astgraph_cudapollute_ep3`, or `lora_scem_harness`.
+- Avoid long names like `scem_qwen35_4b_scem_astgraph_train_cudabench_2gpu_ep3` unless the user explicitly asks for backbone-identifying names or multiple backbones are intentionally mixed in one parent directory.
 
 ## Experiment Logging Requirement
 
@@ -197,7 +198,8 @@ Important behavior:
 - Supports `text`, `prompt/completion`, `messages`, and `instruction/input/output` formats.
 - Supports `.json` and `.jsonl`.
 - Uses region anchors plus random points for next-token training.
-- CUDA state extraction is now generated-prefix-only. Training state uses the assistant/completion prefix, and generation state strips the fixed prompt/chat input before scanning. Do not pass or reintroduce global `task_family` / `tensor_rank` CLI arguments unless the user explicitly asks for that design.
+- CUDA state extraction is AST-graph based. Training state uses the assistant/completion prefix, and generation state strips the fixed prompt/chat input before parsing with `tree_sitter_cuda`. Do not reintroduce global `task_family` / `tensor_rank` fields or the old hand-written CUDA metric vector unless the user explicitly asks for that design.
+- AST graph extraction emits parser-native node/edge IDs with hash embeddings, padded by `--ast-max-nodes` and `--ast-max-edges`. The SCEM model encodes these graphs with an edge-aware Graph Transformer and learned AST memory queries.
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
 - Supports `--val-ratio` with `--var-ratio` as a compatibility alias; validation is split by raw records and used for validation loss tracking.
 - Training now saves regular `step-*` checkpoints, `final/`, and `best/` when validation is enabled.
@@ -497,7 +499,7 @@ For a safer 9B LoRA pilot before a full run, replace the corresponding values ab
 --lora-alpha 8
 ```
 
-Previously verified smoke paths from the pre-prefix-only state layout:
+Previously verified smoke paths from the pre-AST state layout. These are historical only and are incompatible with the current AST graph SCEM:
 
 ```text
 4B SCEM-only single GPU: /data/projects/scem/checkpoints/smoke/scem_qwen35_4b_scem_only_smoke/step-1/scem.pt
@@ -510,14 +512,14 @@ Previously verified smoke paths from the pre-prefix-only state layout:
 
 Current factual status:
 
-- Previous smoke training produced `scem.pt` checkpoints for 4B and 9B, but those checkpoints predate the removal of task-family/tensor-rank state fields and should be retrained for current-code evaluation.
-- A 4B SCEM-only 3-GPU training run completed at `/data/projects/scem/checkpoints/scem_qwen35_4b_scem_only_3gpu/step-724/scem.pt`; it also predates the prefix-only state extractor change and should not be used with current SCEM architecture.
+- Previous smoke training produced `scem.pt` checkpoints for 4B and 9B, but those checkpoints predate the AST graph encoder and must be retrained for current-code evaluation.
+- A 4B SCEM-only 3-GPU training run completed at `/data/projects/scem/checkpoints/scem_qwen35_4b_scem_only_3gpu/step-724/scem.pt`; it predates the AST graph encoder and should not be used with current SCEM architecture.
 - Baselines have been tried for `Qwen3.5-0.8B` and `Qwen3.5-4B`.
 - The 0.8B baseline did not solve CUDABench tasks in a usable way.
 - The best current 4B baseline is kernel-only harness eval at compile 0.26 and functionality 0.19 on `level1_prompt`, `task_stride=5`, before rerunning with the latest stopping changes.
 - Larger local backbones are now available under `/data/projects/scem/models/`.
 - `Qwen3.5-4B` and `Qwen3.5-9B` are compatible with the current Hugging Face/Qwen integration path.
-- `Qwen3.5-4B` SCEM-only DDP and `Qwen3.5-9B` LoRA DDP smoke tests completed successfully before the state-layout change.
+- `Qwen3.5-4B` SCEM-only DDP and `Qwen3.5-9B` LoRA DDP smoke tests completed successfully before the AST graph state change.
 - SCEM checkpoints are backbone-shape specific; retrain SCEM for 4B or 9B instead of reusing a 0.8B SCEM checkpoint.
 - SCEM checkpoints are also architecture/state-layout specific; retrain after changes to `scem/config.py`, `scem/model.py`, or `scem/states.py`.
 - Therefore, the next session should focus primarily on experiments, not basic infrastructure.
@@ -592,9 +594,9 @@ SCEM bias is injected through decoding-time logits processing, not by deeply rew
 
 Training and evaluation default `--alpha` to `1.0`, and normal commands should leave it unset. Treat SCEM as predicting the bias magnitude directly; use `--alpha` only for explicit ablation/debug experiments.
 
-### Default SCEM head is state-gated
+### Default SCEM state path is AST graph based
 
-The default SCEM bias head is now `state_gated_delta`, where CUDA context gates and shifts a low-rank hidden-state correction before vocab projection. The older direct concat fusion remains available as `--bias-arch concat` for ablations and old-checkpoint compatibility.
+The default SCEM state path now parses the generated CUDA prefix with `tree_sitter_cuda`, converts the full AST into a typed graph, encodes it with an edge-aware Graph Transformer, and pools learned AST memory tokens for hidden-state cross attention. The old 7-slot heuristic state encoder and `--bias-arch concat` path are no longer part of the main code path.
 
 Training defaults include a true-state vs corrupted-state margin term (`--state-contrastive-weight`, `--state-contrastive-margin`, `--state-contrastive-mode`) so SCEM is explicitly pressured to make the correct CUDA state outperform a corrupted state. Use `--state-contrastive-weight 0` only for ablation/debug runs.
 
@@ -603,17 +605,11 @@ Training defaults include a true-state vs corrupted-state margin term (`--state-
 Training no longer samples only one random point per example.  
 It expands each CUDA example into multiple next-token points based on region anchors.
 
-### Heuristic state extractor is acceptable for now
+### AST state extractor uses generated prefix
 
-`scem/states.py` is intentionally heuristic and cheap.  
-Do not replace it with a heavy parser unless the user explicitly wants that tradeoff.
+The current SCEM state no longer includes manually supplied task-family or tensor-rank fields, heuristic static flags, or normalized scalar CUDA metrics. Dynamic code state is derived from the active generated CUDA code block/prefix. Tree-sitter error and missing nodes are preserved because incomplete prefixes are meaningful generation states.
 
-### State extractor uses prompt context plus generated prefix
-
-The current SCEM state no longer includes manually supplied task-family or tensor-rank fields.  
-Static/task features are derived from the prompt plus generated prefix, while dynamic code features are derived from the active fenced code block or latest CUDA construct. This preserves task spec and required signature information without letting benchmark prompts or harness text dominate prefix-state features.
-
-Current SCEM checkpoints must be retrained after this state expansion: the state now has 12 static flags, 16 prefix flags, 8 numeric features, and the state encoder emits 7 semantic memory slots instead of the older 4 coarse slots.
+Current SCEM checkpoints must be retrained after this AST graph architecture change. Checkpoints trained with heuristic state tensors or the old concat/state-gated-delta modules are incompatible.
 
 ## Code Style and Editing Rules
 

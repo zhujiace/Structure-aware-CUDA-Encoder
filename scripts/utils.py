@@ -59,7 +59,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scem import (  # noqa: E402
-    CudaProgramStateExtractor,
+    CudaASTGraphExtractor,
     SCEMConfig,
     SCEModule,
     TokenizerCudaStateProvider,
@@ -292,21 +292,10 @@ def load_scem_checkpoint(path: str, model_config, device: str, dtype: torch.dtyp
     if not isinstance(config, SCEMConfig):
         config = SCEMConfig.from_lm_config(model_config)
     state_dict = checkpoint["state_dict"]
-    if any(key.startswith("fusion.") or key.startswith("bias_head.") for key in state_dict):
-        config.bias_arch = "concat"
-    elif any(key.startswith("state_gated_bias_head.") for key in state_dict):
-        config.bias_arch = "state_gated_delta"
-    deprecated_keys = [
-        key
-        for key in state_dict
-        if key.startswith("state_encoder.task_family") or key.startswith("state_encoder.tensor_rank")
-        or key.startswith("state_encoder.static_flags")
-        or key.startswith("state_encoder.prefix_flags")
-    ]
-    if deprecated_keys or not hasattr(config, "num_numeric_features"):
+    if any(key.startswith("state_encoder.program_region") for key in state_dict) or not hasattr(config, "ast_dim"):
         raise ValueError(
-            "This SCEM checkpoint uses an older CUDA state layout. Retrain SCEM with "
-            "the current prompt/task-aware state extractor and 7-slot state encoder."
+            "This SCEM checkpoint uses the old heuristic state encoder. Retrain SCEM with "
+            "the AST graph state encoder."
         )
     scem = SCEModule(config)
     scem.load_state_dict(state_dict)
@@ -371,7 +360,15 @@ class LocalGenerator:
                 scem.eval()
             state_provider = TokenizerCudaStateProvider(
                 tokenizer=self.tokenizer,
-                extractor=CudaProgramStateExtractor(),
+                extractor=CudaASTGraphExtractor(
+                    max_nodes=scem.config.ast_max_nodes if hasattr(scem.config, "ast_max_nodes") else 512,
+                    max_edges=scem.config.ast_max_edges if hasattr(scem.config, "ast_max_edges") else 2048,
+                    node_type_vocab_size=scem.config.ast_node_type_vocab_size,
+                    edge_type_vocab_size=scem.config.ast_edge_type_vocab_size,
+                    text_vocab_size=scem.config.ast_text_vocab_size,
+                    max_depth=scem.config.ast_max_depth,
+                    max_child_index=scem.config.ast_max_child_index,
+                ),
             )
             self.state_provider = state_provider
             attach_scem_hidden_state_capture(self.model)

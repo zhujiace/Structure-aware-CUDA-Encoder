@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from scem import CudaProgramStateBatch, CudaProgramStateExtractor, SCEMConfig, SCEModule
+from scem import CudaASTGraphBatch, CudaASTGraphExtractor, SCEMConfig, SCEModule
 from train import PrefixCollator, PrefixNextTokenDataset, get_lm_config, split_train_validation_records
 
 
@@ -66,15 +66,7 @@ def parse_args():
     parser.add_argument(
         "--state-ablation",
         action="append",
-        choices=[
-            "true",
-            "zero_all",
-            "shuffled",
-            "zero_static",
-            "zero_prefix",
-            "zero_numeric",
-            "unknown_region",
-        ],
+        choices=["true", "zero_all", "shuffled"],
         default=None,
         help="State variant to evaluate. Can be passed multiple times. Default: true.",
     )
@@ -130,10 +122,6 @@ def load_scem(label: str, path: Path, model, dtype: torch.dtype, device: torch.d
         raise ValueError(f"{path} does not contain a SCEM state_dict")
     config = config_from_checkpoint(checkpoint, model)
     state_dict = checkpoint["state_dict"]
-    if any(key.startswith("fusion.") or key.startswith("bias_head.") for key in state_dict):
-        config.bias_arch = "concat"
-    elif any(key.startswith("state_gated_bias_head.") for key in state_dict):
-        config.bias_arch = "state_gated_delta"
     scem = SCEModule(config).to(device=device, dtype=dtype)
     missing, unexpected = scem.load_state_dict(state_dict, strict=False)
     if missing or unexpected:
@@ -295,7 +283,7 @@ def update_scem_stats(
     stats: RunningStats,
     scem: SCEModule,
     hidden: torch.Tensor,
-    states: CudaProgramStateBatch,
+    states: CudaASTGraphBatch,
     logits: torch.Tensor,
     labels: torch.Tensor,
     args,
@@ -347,56 +335,27 @@ def update_scem_stats(
     stats.update_max("max_abs_bias", max_abs)
 
 
-def clone_state_batch(state_batch: CudaProgramStateBatch) -> CudaProgramStateBatch:
-    return CudaProgramStateBatch(
-        program_region=state_batch.program_region.clone(),
-        static_flags=state_batch.static_flags.clone(),
-        prefix_flags=state_batch.prefix_flags.clone(),
-        numeric_features=state_batch.numeric_features.clone(),
-    )
-
-
-def make_zero_state_batch(batch_size: int, device: torch.device) -> CudaProgramStateBatch:
-    return CudaProgramStateBatch(
-        program_region=torch.zeros(batch_size, dtype=torch.long, device=device),
-        static_flags=torch.zeros(batch_size, 12, dtype=torch.float32, device=device),
-        prefix_flags=torch.zeros(batch_size, 16, dtype=torch.float32, device=device),
-        numeric_features=torch.zeros(batch_size, 8, dtype=torch.float32, device=device),
-    )
-
-
 def make_state_batch_for_ablation(
     mode: str,
-    true_batch: CudaProgramStateBatch,
-    all_states,
+    true_batch: CudaASTGraphBatch,
+    extractor: CudaASTGraphExtractor,
+    all_prefixes: Sequence[str],
     batch_start: int,
     batch_size: int,
     shuffle_offset: int,
     device: torch.device,
-) -> CudaProgramStateBatch:
+) -> CudaASTGraphBatch:
     if mode == "true":
         return true_batch
     if mode == "shuffled":
-        if not all_states:
+        if not all_prefixes:
             return true_batch
-        state_count = len(all_states)
-        shuffled_states = [all_states[(batch_start + index + shuffle_offset) % state_count] for index in range(batch_size)]
-        return CudaProgramStateBatch.from_states(shuffled_states, device=device)
+        state_count = len(all_prefixes)
+        shuffled_prefixes = [all_prefixes[(batch_start + index + shuffle_offset) % state_count] for index in range(batch_size)]
+        return extractor.extract_batch(shuffled_prefixes, device=device)
     if mode == "zero_all":
-        return make_zero_state_batch(batch_size, device)
-
-    ablated = clone_state_batch(true_batch)
-    if mode == "zero_static":
-        ablated.static_flags.zero_()
-    elif mode == "zero_prefix":
-        ablated.prefix_flags.zero_()
-    elif mode == "zero_numeric":
-        ablated.numeric_features.zero_()
-    elif mode == "unknown_region":
-        ablated.program_region.zero_()
-    else:
-        raise ValueError(f"Unsupported state ablation: {mode}")
-    return ablated
+        return true_batch.zero_like()
+    raise ValueError(f"Unsupported state ablation: {mode}")
 
 
 def rows_to_csv(rows: Sequence[Dict[str, Any]], path: Path) -> None:
@@ -433,8 +392,8 @@ def main():
 
     state_ablation_modes = args.state_ablation or ["true"]
     dataloader, dataset, point_count, train_count, val_count = build_dataloader(args, tokenizer)
-    extractor = CudaProgramStateExtractor()
-    all_states = extractor.extract_batch([example.state_prefix for example in dataset.examples])
+    extractor = CudaASTGraphExtractor()
+    all_prefixes = [example.state_prefix for example in dataset.examples]
     shuffle_offset = args.shuffle_offset
     if shuffle_offset is None:
         shuffle_offset = max(1, point_count // 2)
@@ -465,8 +424,7 @@ def main():
             input_ids = batch.input_ids.to(device)
             attention_mask = batch.attention_mask.to(device)
             labels = batch.labels.to(device)
-            states = extractor.extract_batch(batch.state_prefix_texts)
-            state_batch = CudaProgramStateBatch.from_states(states, device=device)
+            state_batch = extractor.extract_batch(batch.state_prefix_texts, device=device)
             batch_size = labels.numel()
             outputs = model(
                 input_ids=input_ids,
@@ -483,7 +441,8 @@ def main():
                 ablation: make_state_batch_for_ablation(
                     ablation,
                     state_batch,
-                    all_states,
+                    extractor,
+                    all_prefixes,
                     processed_points,
                     batch_size,
                     shuffle_offset,

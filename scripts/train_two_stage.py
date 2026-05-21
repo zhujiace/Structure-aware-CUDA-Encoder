@@ -23,11 +23,13 @@ for path in (str(PROJECT_ROOT), str(SCRIPT_DIR)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-from scem import CudaProgramStateBatch, CudaProgramStateExtractor, SCEMConfig, SCEModule
+from scem import CudaASTGraphExtractor, SCEModule
 from scem.states import GENERATED_PREFIX_MARKER
 from train import (  # noqa: E402
     REGION_ANCHORS,
     TrainingRunLogger,
+    build_ast_extractor,
+    build_scem_config,
     configure_backbone,
     compute_state_conditioned_loss,
     get_lm_config,
@@ -74,9 +76,20 @@ def parse_args():
     parser.add_argument("--grad-accum-steps", type=int, default=32)
     parser.add_argument("--alpha", type=float, default=1.0)
     parser.add_argument("--bias-rank", type=int, default=64)
-    parser.add_argument("--bias-arch", choices=["concat", "state_gated_delta"], default="state_gated_delta")
     parser.add_argument("--state-gate-scale", type=float, default=1.0)
-    parser.add_argument("--state-shift-scale", type=float, default=0.1)
+    parser.add_argument("--state-shift-scale", type=float, default=1.0)
+    parser.add_argument("--ast-dim", type=int, default=256)
+    parser.add_argument("--ast-ffn-dim", type=int, default=512)
+    parser.add_argument("--ast-layers", type=int, default=3)
+    parser.add_argument("--ast-heads", type=int, default=4)
+    parser.add_argument("--ast-memory-slots", type=int, default=16)
+    parser.add_argument("--ast-node-type-vocab-size", type=int, default=4096)
+    parser.add_argument("--ast-edge-type-vocab-size", type=int, default=1024)
+    parser.add_argument("--ast-text-vocab-size", type=int, default=8192)
+    parser.add_argument("--ast-max-nodes", type=int, default=512)
+    parser.add_argument("--ast-max-edges", type=int, default=2048)
+    parser.add_argument("--ast-max-depth", type=int, default=64)
+    parser.add_argument("--ast-max-child-index", type=int, default=64)
     parser.add_argument(
         "--state-contrastive-weight",
         type=float,
@@ -461,8 +474,7 @@ def compute_batch_loss(model, scem, batch: MultiPointBatch, extractor, args, acc
     point_batch_indices = batch.point_batch_indices.to(accelerator.device)
     point_positions = batch.point_positions.to(accelerator.device)
     labels = batch.labels.to(accelerator.device)
-    states = extractor.extract_batch(batch.state_prefix_texts)
-    state_batch = CudaProgramStateBatch.from_states(states, device=accelerator.device)
+    state_batch = extractor.extract_batch(batch.state_prefix_texts, device=accelerator.device)
 
     with torch.no_grad():
         outputs = model(
@@ -764,13 +776,7 @@ def main():
     model = configure_backbone(model, args)
     model.eval()
 
-    scem_config = SCEMConfig.from_lm_config(
-        get_lm_config(model),
-        bias_rank=args.bias_rank,
-        bias_arch=args.bias_arch,
-        state_gate_scale=args.state_gate_scale,
-        state_shift_scale=args.state_shift_scale,
-    )
+    scem_config = build_scem_config(args, get_lm_config(model))
     scem = SCEModule(scem_config).to(dtype=next(model.parameters()).dtype)
     if args.init_scem_checkpoint:
         load_scem_weights(args.init_scem_checkpoint, scem)
@@ -845,7 +851,7 @@ def main():
     if adapt_val_loader is not None:
         adapt_val_loader = prepared[offset]
 
-    extractor = CudaProgramStateExtractor()
+    extractor = build_ast_extractor(args)
     log_initial_validation(
         model=model,
         scem=scem,

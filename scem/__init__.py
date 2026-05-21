@@ -10,7 +10,7 @@ from .qwen_integration import (
     detach_scem_from_causal_lm,
     detach_scem_hidden_state_capture,
 )
-from .states import CudaProgramState, CudaProgramStateBatch, CudaProgramStateExtractor
+from .states import CudaASTGraphBatch, CudaASTGraphExtractor, IncrementalTreeSitterCudaAST
 
 __all__ = [
     "SCEMConfig",
@@ -25,7 +25,7 @@ __all__ = [
     "detach_scem_from_causal_lm",
     "detach_scem_hidden_state_capture",
     "make_static_state_provider",
-    "CudaProgramState",
-    "CudaProgramStateBatch",
-    "CudaProgramStateExtractor",
+    "CudaASTGraphBatch",
+    "CudaASTGraphExtractor",
+    "IncrementalTreeSitterCudaAST",
 ]

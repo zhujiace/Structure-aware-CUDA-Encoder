@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Callable, Sequence
+from typing import Callable
 
 import torch
 from transformers import LogitsProcessor
 
 from .model import SCEModule
-from .states import CudaProgramStateBatch
+from .states import CudaASTGraphBatch
 
 
-StateProvider = Callable[[torch.LongTensor], CudaProgramStateBatch]
+StateProvider = Callable[[torch.LongTensor], CudaASTGraphBatch]
 HiddenStateProvider = Callable[[], torch.Tensor]
 
 
@@ -49,13 +49,11 @@ class SCEMLogitsProcessor(LogitsProcessor):
         return scores + self.alpha * output.bias.to(dtype=scores.dtype)
 
 
-def make_static_state_provider(states: Sequence) -> StateProvider:
+def make_static_state_provider(batch: CudaASTGraphBatch) -> StateProvider:
     """Create a state provider for tests or fixed-prefix decoding experiments."""
 
-    batch = CudaProgramStateBatch.from_states(states)
-
-    def provider(input_ids: torch.LongTensor) -> CudaProgramStateBatch:
-        if input_ids.shape[0] != batch.program_region.shape[0]:
+    def provider(input_ids: torch.LongTensor) -> CudaASTGraphBatch:
+        if input_ids.shape[0] != batch.batch_size:
             raise ValueError("input_ids batch size does not match the fixed SCEM state batch")
         return batch
 

@@ -8,24 +8,41 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scem import CudaProgramStateBatch, CudaProgramStateExtractor, SCEMConfig, SCEModule
+from scem import CudaASTGraphExtractor, SCEMConfig, SCEModule
 
 
 def main():
     lm_config = AutoConfig.from_pretrained("./models/Qwen3-0.6B-Base", local_files_only=True)
-    config = SCEMConfig.from_lm_config(lm_config, bias_rank=32)
+    config = SCEMConfig.from_lm_config(
+        lm_config,
+        bias_rank=32,
+        ast_dim=128,
+        ast_ffn_dim=256,
+        ast_layers=2,
+        ast_heads=4,
+        ast_memory_slots=8,
+        memory_dim=128,
+        context_dim=128,
+    )
     scem = SCEModule(config)
 
-    extractor = CudaProgramStateExtractor()
-    states = extractor.extract_batch(
+    extractor = CudaASTGraphExtractor(
+        max_nodes=config.ast_max_nodes,
+        max_edges=config.ast_max_edges,
+        node_type_vocab_size=config.ast_node_type_vocab_size,
+        edge_type_vocab_size=config.ast_edge_type_vocab_size,
+        text_vocab_size=config.ast_text_vocab_size,
+        max_depth=config.ast_max_depth,
+        max_child_index=config.ast_max_child_index,
+    )
+    batch = extractor.extract_batch(
         [
             '__global__ void add(float* x, float* y, float* out, int n) { int idx = blockIdx.x * blockDim.x + threadIdx.x; if (idx < n) { out[idx] =',
             "__global__ void reduce(float* x, float* out) { extern __shared__ float smem[]; smem[threadIdx.x] = x[threadIdx.x]; __syncthreads();",
         ]
     )
-    batch = CudaProgramStateBatch.from_states(states)
-    hidden = torch.randn(len(states), config.lm_hidden_size)
-    logits = torch.randn(len(states), config.vocab_size)
+    hidden = torch.randn(batch.batch_size, config.lm_hidden_size)
+    logits = torch.randn(batch.batch_size, config.vocab_size)
 
     with torch.no_grad():
         output = scem(hidden, batch, return_attention=True)
