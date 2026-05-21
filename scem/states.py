@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import re
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -390,3 +390,338 @@ class CudaProgramStateExtractor:
                 " N",
             )
         )
+
+
+@dataclass
+class CudaASTNode:
+    """One node from a native tree-sitter-cuda AST."""
+
+    id: int
+    type: str
+    named: bool
+    start_byte: int
+    end_byte: int
+    start_point: Tuple[int, int]
+    end_point: Tuple[int, int]
+    has_error: bool
+    is_missing: bool
+    text: Optional[str] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return self.__dict__.copy()
+
+
+@dataclass
+class CudaASTEdge:
+    """A typed relation between two AST nodes."""
+
+    source: int
+    target: int
+    type: str
+    field_name: Optional[str] = None
+    child_index: Optional[int] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        data = self.__dict__.copy()
+        return {key: value for key, value in data.items() if value is not None}
+
+
+@dataclass
+class CudaASTSnapshot:
+    """Full parser-native AST graph for a generated CUDA prefix."""
+
+    provider: str
+    incremental_reused: bool
+    source_bytes: int
+    root_id: int
+    root_type: str
+    root_has_error: bool
+    nodes: List[CudaASTNode]
+    edges: List[CudaASTEdge]
+    node_type_counts: Dict[str, int]
+    edge_type_counts: Dict[str, int]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "incremental_reused": self.incremental_reused,
+            "source_bytes": self.source_bytes,
+            "root_id": self.root_id,
+            "root_type": self.root_type,
+            "root_has_error": self.root_has_error,
+            "node_count": len(self.nodes),
+            "edge_count": len(self.edges),
+            "node_type_counts": self.node_type_counts,
+            "edge_type_counts": self.edge_type_counts,
+            "nodes": [node.as_dict() for node in self.nodes],
+            "edges": [edge.as_dict() for edge in self.edges],
+        }
+
+    def summary_dict(self) -> Dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "incremental_reused": self.incremental_reused,
+            "source_bytes": self.source_bytes,
+            "root_id": self.root_id,
+            "root_type": self.root_type,
+            "root_has_error": self.root_has_error,
+            "node_count": len(self.nodes),
+            "edge_count": len(self.edges),
+            "node_type_counts": self.node_type_counts,
+            "edge_type_counts": self.edge_type_counts,
+        }
+
+
+class IncrementalTreeSitterCudaAST:
+    """Incrementally parse generated CUDA code and expose the full AST graph.
+
+    This component intentionally does not emit ``CudaProgramState`` and is not
+    wired into train/eval. It keeps the parser-native tree structure instead of
+    compressing the AST into hand-written CUDA metrics.
+    """
+
+    def __init__(self, include_text: bool = True, text_limit: int = 160):
+        self.parser, self.provider = self._make_parser()
+        self.include_text = include_text
+        self.text_limit = text_limit
+        self._source = ""
+        self._tree = None
+
+    def reset(self) -> None:
+        self._source = ""
+        self._tree = None
+
+    def parse(self, source: str, incremental: bool = True) -> CudaASTSnapshot:
+        source = self._focus_code(source)
+        previous_source = self._source if incremental else ""
+        previous_tree = self._tree if incremental else None
+        tree, reused = self._parse_incremental(source, previous_source, previous_tree)
+        if incremental:
+            self._source = source
+            self._tree = tree
+        return self._snapshot(source, tree, reused)
+
+    @staticmethod
+    def _make_parser() -> Tuple[Any, str]:
+        try:
+            from tree_sitter import Language, Parser
+            import tree_sitter_cuda
+        except ImportError as exc:
+            raise RuntimeError(
+                "IncrementalTreeSitterCudaAST requires tree_sitter and tree_sitter_cuda. "
+                "Install with `/home/zhujiace/anaconda3/envs/llama/bin/pip install tree-sitter tree-sitter-cuda`."
+            ) from exc
+
+        try:
+            language = Language(tree_sitter_cuda.language())
+        except TypeError:
+            language = tree_sitter_cuda.language()
+        parser = Parser()
+        if hasattr(parser, "set_language"):
+            parser.set_language(language)
+        else:
+            parser.language = language
+        return parser, "tree_sitter_cuda"
+
+    def _parse_incremental(self, source: str, previous_source: str, previous_tree: Any) -> Tuple[Any, bool]:
+        source_bytes = source.encode("utf-8", errors="replace")
+        if previous_tree is not None and source.startswith(previous_source):
+            previous_bytes = previous_source.encode("utf-8", errors="replace")
+            start_byte = len(previous_bytes)
+            start_point = self._point_at_byte(previous_bytes, start_byte)
+            new_end_point = self._point_at_byte(source_bytes, len(source_bytes))
+            previous_tree.edit(
+                start_byte=start_byte,
+                old_end_byte=start_byte,
+                new_end_byte=len(source_bytes),
+                start_point=start_point,
+                old_end_point=start_point,
+                new_end_point=new_end_point,
+            )
+            return self.parser.parse(source_bytes, previous_tree), True
+        return self.parser.parse(source_bytes), False
+
+    def _snapshot(self, source: str, tree: Any, incremental_reused: bool) -> CudaASTSnapshot:
+        source_bytes = source.encode("utf-8", errors="replace")
+        raw_nodes = list(self._walk_nodes(tree.root_node))
+        node_ids = {self._node_key(node): index for index, node in enumerate(raw_nodes)}
+        nodes = [
+            CudaASTNode(
+                id=node_ids[self._node_key(node)],
+                type=node.type,
+                named=self._is_named(node),
+                start_byte=node.start_byte,
+                end_byte=node.end_byte,
+                start_point=self._point_tuple(node.start_point),
+                end_point=self._point_tuple(node.end_point),
+                has_error=self._node_has_error(node),
+                is_missing=self._is_missing(node),
+                text=self._node_text_limited(source_bytes, node) if self.include_text else None,
+            )
+            for node in raw_nodes
+        ]
+        edges = self._build_edges(raw_nodes, node_ids)
+        node_type_counts: Dict[str, int] = {}
+        for node in raw_nodes:
+            node_type_counts[node.type] = node_type_counts.get(node.type, 0) + 1
+        edge_type_counts: Dict[str, int] = {}
+        for edge in edges:
+            edge_type_counts[edge.type] = edge_type_counts.get(edge.type, 0) + 1
+        return CudaASTSnapshot(
+            provider=self.provider,
+            incremental_reused=incremental_reused,
+            root_has_error=self._node_has_error(tree.root_node),
+            source_bytes=len(source_bytes),
+            root_id=node_ids[self._node_key(tree.root_node)],
+            root_type=tree.root_node.type,
+            nodes=nodes,
+            edges=edges,
+            node_type_counts={key: node_type_counts[key] for key in sorted(node_type_counts)},
+            edge_type_counts={key: edge_type_counts[key] for key in sorted(edge_type_counts)},
+        )
+
+    @staticmethod
+    def _focus_code(text: str) -> str:
+        if GENERATED_PREFIX_MARKER in text:
+            text = text.rsplit(GENERATED_PREFIX_MARKER, 1)[1]
+        fences = list(re.finditer(r"```[^\n`]*\n?", text))
+        if fences:
+            if len(fences) % 2 == 1:
+                return text[fences[-1].end() :]
+            return text[fences[-2].end() : fences[-1].start()]
+        markers = [text.find(marker) for marker in ("__global__", "__device__", "__host__", "#include") if marker in text]
+        return text[min(markers) :] if markers else text
+
+    @staticmethod
+    def _walk_nodes(root: Any) -> Iterable[Any]:
+        stack = [root]
+        while stack:
+            node = stack.pop()
+            yield node
+            stack.extend(reversed(node.children))
+
+    @classmethod
+    def _build_edges(cls, nodes: Sequence[Any], node_ids: Dict[Tuple[Any, ...], int]) -> List[CudaASTEdge]:
+        edges: List[CudaASTEdge] = []
+        for parent in nodes:
+            parent_id = node_ids[cls._node_key(parent)]
+            children = list(parent.children)
+            for index, child in enumerate(children):
+                child_id = node_ids[cls._node_key(child)]
+                field_name = cls._field_name_for_child(parent, index)
+                edges.append(
+                    CudaASTEdge(
+                        source=parent_id,
+                        target=child_id,
+                        type="child",
+                        field_name=field_name,
+                        child_index=index,
+                    )
+                )
+                edges.append(
+                    CudaASTEdge(
+                        source=child_id,
+                        target=parent_id,
+                        type="parent",
+                        field_name=field_name,
+                        child_index=index,
+                    )
+                )
+                if field_name:
+                    edges.append(
+                        CudaASTEdge(
+                            source=parent_id,
+                            target=child_id,
+                            type=f"field:{field_name}",
+                            field_name=field_name,
+                            child_index=index,
+                        )
+                )
+                if index > 0:
+                    previous_id = node_ids[cls._node_key(children[index - 1])]
+                    edges.append(
+                        CudaASTEdge(
+                            source=previous_id,
+                            target=child_id,
+                            type="next_sibling",
+                            child_index=index,
+                        )
+                    )
+                    edges.append(
+                        CudaASTEdge(
+                            source=child_id,
+                            target=previous_id,
+                            type="prev_sibling",
+                            child_index=index - 1,
+                        )
+                    )
+        return edges
+
+    @classmethod
+    def _node_key(cls, node: Any) -> Tuple[Any, ...]:
+        return (
+            node.type,
+            node.start_byte,
+            node.end_byte,
+            cls._point_tuple(node.start_point),
+            cls._point_tuple(node.end_point),
+            cls._is_named(node),
+        )
+
+    @staticmethod
+    def _field_name_for_child(parent: Any, child_index: int) -> Optional[str]:
+        method = getattr(parent, "field_name_for_child", None)
+        if not method:
+            return None
+        try:
+            return method(child_index)
+        except (TypeError, IndexError):
+            return None
+
+    @staticmethod
+    def _point_at_byte(source_bytes: bytes, byte_offset: int) -> Any:
+        from tree_sitter import Point
+
+        prefix = source_bytes[:byte_offset]
+        row = prefix.count(b"\n")
+        last_newline = prefix.rfind(b"\n")
+        column = len(prefix) if last_newline < 0 else len(prefix) - last_newline - 1
+        return Point(row, column)
+
+    @staticmethod
+    def _point_tuple(point: Any) -> Tuple[int, int]:
+        if hasattr(point, "row") and hasattr(point, "column"):
+            row = point.row
+            column = point.column
+        elif point:
+            row = point[0]
+            column = point[1]
+        else:
+            row = 0
+            column = 0
+        return int(row), int(column)
+
+    @staticmethod
+    def _is_named(node: Any) -> bool:
+        value = getattr(node, "is_named", False)
+        return bool(value() if callable(value) else value)
+
+    @staticmethod
+    def _node_has_error(node: Any) -> bool:
+        value = getattr(node, "has_error", False)
+        return bool(value() if callable(value) else value)
+
+    @staticmethod
+    def _is_missing(node: Any) -> bool:
+        value = getattr(node, "is_missing", False)
+        return bool(value() if callable(value) else value)
+
+    @staticmethod
+    def _node_text(source_bytes: bytes, node: Any) -> str:
+        return source_bytes[node.start_byte : node.end_byte].decode("utf-8", errors="replace")
+
+    def _node_text_limited(self, source_bytes: bytes, node: Any) -> str:
+        text = self._node_text(source_bytes, node)
+        if len(text) <= self.text_limit:
+            return text
+        return text[: self.text_limit] + "..."
