@@ -31,6 +31,7 @@ scem/
   qwen_integration.py   Qwen/HF causal-LM integration helpers
 
 scripts/
+  cuda_ast_viewer.py    Local browser/CLI app for live CUDA AST inspection
   demo.py               Interactive CUDABench generation/debug script
   eval.py               CUDABench compile/functionality evaluation
   harness_eval.py       Kernel-only CUDABench evaluation with fixed bench.cu harness
@@ -76,6 +77,10 @@ The AST graph encoder is part of SCEM and is trained end-to-end with the bias he
 
 `SCEMConfig` lives in `scem/config.py`.
 
+The default values are chosen for the Qwen3.5-4B experiments. If the SCEM
+architecture itself needs to change, edit `SCEMConfig` directly instead of
+passing many model-internal flags through `scripts/train.py`.
+
 Backbone-dependent parameters:
 
 - `lm_hidden_size`: hidden size of the backbone LM final hidden state.
@@ -91,12 +96,14 @@ AST graph encoder dimensions:
 - `ast_node_type_vocab_size`, `ast_edge_type_vocab_size`, `ast_text_vocab_size`: hash embedding table sizes for parser-native node types, edge types, and leaf text.
 - `ast_max_nodes`, `ast_max_edges`: truncation caps for padded AST graph batches.
 - `ast_max_depth`, `ast_max_child_index`: embedding caps for AST depth and child order.
+- `ast_node_flag_dim`, `ast_node_position_dim`: dimensions for AST node flags and source/cursor position features.
 
 SCEM fusion dimensions:
 
 - `memory_dim`: dimension of AST memory slots.
 - `context_dim`: cross-attention query/key/value working dimension.
 - `num_attention_heads`: number of hidden-to-AST-memory cross-attention heads.
+- `num_scem_queries`: number of LM-hidden query tokens used to read AST memory.
 - `dropout`: dropout inside SCEM.
 
 Bias head parameters:
@@ -174,6 +181,32 @@ field:declarator
 ```
 
 The model uses these edge types directly through edge-aware graph attention. No hand-written CUDA metric vector is used in the current SCEM state path.
+
+For prefixes that have not entered a CUDA code block or CUDA construct yet,
+the extractor returns an inactive AST state instead of parsing natural language
+as code. SCEM masks inactive states to zero bias, so pure-text stages are left
+to the backbone while code-generation stages can use CUDA structure.
+
+The graph batch also marks the generation frontier: nodes near the current
+cursor, cursor ancestors, source length, and cursor distance are exposed as
+node flags/position features. These features help SCEM distinguish whether the
+prefix is at a signature, inside a block, near an incomplete expression, or at
+the end of a statement.
+
+For a lightweight interactive AST display independent of model training or
+generation, run:
+
+```bash
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/cuda_ast_viewer.py
+```
+
+Then open the printed local URL. The page reparses on every edit and displays
+the current `tree_sitter_cuda` AST plus whether the previous parse tree was
+reused incrementally. For terminal-only inspection:
+
+```bash
+cat kernel.cu | /home/zhujiace/anaconda3/envs/llama/bin/python scripts/cuda_ast_viewer.py --stdin
+```
 
 ## Generation
 
@@ -678,21 +711,7 @@ Optimization:
 SCEM:
 
 - `--alpha`: optional SCEM bias scale for ablations; default `1.0`.
-- `--bias-rank`: low-rank vocab bias rank.
-- `--state-gate-scale`: scale for state-conditioned multiplicative gating.
-- `--state-shift-scale`: scale for state-conditioned additive low-rank shift.
-- `--ast-dim`: hidden dimension for AST graph nodes.
-- `--ast-ffn-dim`: feed-forward dimension inside graph transformer layers.
-- `--ast-layers`: number of edge-aware graph transformer layers.
-- `--ast-heads`: number of graph attention heads.
-- `--ast-memory-slots`: number of learned AST memory tokens cross-attended by the LM hidden state.
-- `--ast-node-type-vocab-size`: hash embedding table size for parser-native AST node types.
-- `--ast-edge-type-vocab-size`: hash embedding table size for typed AST edges.
-- `--ast-text-vocab-size`: hash embedding table size for leaf text.
-- `--ast-max-nodes`: max AST nodes kept per prefix.
-- `--ast-max-edges`: max typed AST edges kept per prefix.
-- `--ast-max-depth`: AST depth embedding cap.
-- `--ast-max-child-index`: child-order embedding cap.
+- `--ast-cache-dir`: directory for cached AST graph tensors. Defaults to `train_outputs/ast_cache`; pass an empty string to disable.
 - `--state-contrastive-weight`: weight for the true-state vs corrupted-state margin loss. Set `0` to disable.
 - `--state-contrastive-margin`: required CE margin between true and corrupted state.
 - `--state-contrastive-mode`: corrupted-state source: `zero_all`, `shuffle`, `both`, or `none`.

@@ -358,6 +358,20 @@ def make_state_batch_for_ablation(
     raise ValueError(f"Unsupported state ablation: {mode}")
 
 
+def make_extractor_from_config(config: SCEMConfig) -> CudaASTGraphExtractor:
+    return CudaASTGraphExtractor(
+        max_nodes=config.ast_max_nodes,
+        max_edges=config.ast_max_edges,
+        node_type_vocab_size=config.ast_node_type_vocab_size,
+        edge_type_vocab_size=config.ast_edge_type_vocab_size,
+        text_vocab_size=config.ast_text_vocab_size,
+        max_depth=config.ast_max_depth,
+        max_child_index=config.ast_max_child_index,
+        node_flag_dim=config.ast_node_flag_dim,
+        node_position_dim=config.ast_node_position_dim,
+    )
+
+
 def rows_to_csv(rows: Sequence[Dict[str, Any]], path: Path) -> None:
     fieldnames: List[str] = []
     for row in rows:
@@ -392,7 +406,6 @@ def main():
 
     state_ablation_modes = args.state_ablation or ["true"]
     dataloader, dataset, point_count, train_count, val_count = build_dataloader(args, tokenizer)
-    extractor = CudaASTGraphExtractor()
     all_prefixes = [example.state_prefix for example in dataset.examples]
     shuffle_offset = args.shuffle_offset
     if shuffle_offset is None:
@@ -402,6 +415,7 @@ def main():
     scems: List[Tuple[str, str, SCEModule]] = []
     for label, checkpoint_path in checkpoint_specs:
         scems.append((label, str(checkpoint_path), load_scem(label, checkpoint_path, model, dtype, device)))
+    extractor = make_extractor_from_config(scems[0][2].config) if scems else CudaASTGraphExtractor()
 
     stats: List[RunningStats] = []
     if args.include_baseline_row:

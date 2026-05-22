@@ -361,13 +361,15 @@ class LocalGenerator:
             state_provider = TokenizerCudaStateProvider(
                 tokenizer=self.tokenizer,
                 extractor=CudaASTGraphExtractor(
-                    max_nodes=scem.config.ast_max_nodes if hasattr(scem.config, "ast_max_nodes") else 512,
-                    max_edges=scem.config.ast_max_edges if hasattr(scem.config, "ast_max_edges") else 2048,
+                    max_nodes=scem.config.ast_max_nodes,
+                    max_edges=scem.config.ast_max_edges,
                     node_type_vocab_size=scem.config.ast_node_type_vocab_size,
                     edge_type_vocab_size=scem.config.ast_edge_type_vocab_size,
                     text_vocab_size=scem.config.ast_text_vocab_size,
                     max_depth=scem.config.ast_max_depth,
                     max_child_index=scem.config.ast_max_child_index,
+                    node_flag_dim=scem.config.ast_node_flag_dim,
+                    node_position_dim=scem.config.ast_node_position_dim,
                 ),
             )
             self.state_provider = state_provider

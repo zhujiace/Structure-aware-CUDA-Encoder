@@ -90,6 +90,14 @@ class EdgeAwareGraphTransformerLayer(nn.Module):
             flat_out.scatter_add_(0, scatter_index, messages)
             attended = flat_out.view(batch_size, node_count, self.dim)
 
+        zero_dependency = (
+            query.sum()
+            + key.sum()
+            + value.sum()
+            + self.edge_bias.weight.sum().to(dtype=hidden.dtype)
+            + self.edge_value.weight.sum().to(dtype=hidden.dtype)
+        ) * 0.0
+        attended = attended + zero_dependency
         hidden = self.norm1(hidden + self.dropout(self.out_proj(attended)))
         hidden = self.norm2(hidden + self.dropout(self.ffn(hidden)))
         return hidden * graph.node_mask.unsqueeze(-1).to(dtype=hidden.dtype)
@@ -115,8 +123,8 @@ class CudaASTGraphEncoder(nn.Module):
         self.node_text_embedding = nn.Embedding(config.ast_text_vocab_size, config.ast_dim, padding_idx=0)
         self.depth_embedding = nn.Embedding(config.ast_max_depth + 1, config.ast_dim)
         self.child_index_embedding = nn.Embedding(config.ast_max_child_index + 1, config.ast_dim)
-        self.flag_projection = nn.Linear(3, config.ast_dim)
-        self.position_projection = nn.Linear(3, config.ast_dim)
+        self.flag_projection = nn.Linear(config.ast_node_flag_dim, config.ast_dim)
+        self.position_projection = nn.Linear(config.ast_node_position_dim, config.ast_dim)
         self.input_norm = nn.LayerNorm(config.ast_dim)
         self.layers = nn.ModuleList([EdgeAwareGraphTransformerLayer(config) for _ in range(config.ast_layers)])
         self.memory_queries = nn.Parameter(torch.randn(config.ast_memory_slots, config.ast_dim) * 0.02)
@@ -146,15 +154,24 @@ class CudaASTGraphEncoder(nn.Module):
         for layer in self.layers:
             hidden = layer(hidden, graph)
 
+        active_graph = graph.node_mask.any(dim=1)
+        safe_node_mask = graph.node_mask
+        if bool((~active_graph).any()):
+            safe_node_mask = graph.node_mask.clone()
+            safe_node_mask[~active_graph, 0] = True
+
         queries = self.memory_queries.unsqueeze(0).expand(hidden.shape[0], -1, -1).to(dtype=hidden.dtype)
         memory, _ = self.memory_attention(
             query=queries,
             key=hidden,
             value=hidden,
-            key_padding_mask=~graph.node_mask,
+            key_padding_mask=~safe_node_mask,
             need_weights=False,
         )
-        return self.memory_projection(memory)
+        memory = self.memory_projection(memory)
+        if bool((~active_graph).any()):
+            memory = memory.masked_fill((~active_graph).view(-1, 1, 1), 0.0)
+        return memory
 
 
 class SCEMStateGatedBiasHead(nn.Module):
@@ -205,13 +222,20 @@ class SCEModule(nn.Module):
         self.config = config
         self.state_encoder = CudaASTGraphEncoder(config)
         self.hidden_norm = nn.LayerNorm(config.lm_hidden_size)
-        self.query_projection = nn.Linear(config.lm_hidden_size, config.context_dim)
+        self.query_projection = nn.Linear(config.lm_hidden_size, config.num_scem_queries * config.context_dim)
+        self.query_slot_embedding = nn.Parameter(torch.randn(config.num_scem_queries, config.context_dim) * 0.02)
         self.memory_projection = nn.Linear(config.memory_dim, config.context_dim)
         self.cross_attention = nn.MultiheadAttention(
             embed_dim=config.context_dim,
             num_heads=config.num_attention_heads,
             dropout=config.dropout,
             batch_first=True,
+        )
+        self.context_projection = nn.Sequential(
+            nn.LayerNorm(config.num_scem_queries * config.context_dim),
+            nn.Linear(config.num_scem_queries * config.context_dim, config.context_dim),
+            nn.SiLU(),
+            nn.Linear(config.context_dim, config.context_dim),
         )
         self.bias_head = SCEMStateGatedBiasHead(config)
 
@@ -228,18 +252,33 @@ class SCEModule(nn.Module):
 
         hidden_state = hidden_state.to(dtype=self.hidden_norm.weight.dtype)
         state = state.to(hidden_state.device)
+        active_state = state.node_mask.any(dim=1)
         memory = self.state_encoder(state)
-        query = self.query_projection(self.hidden_norm(hidden_state)).unsqueeze(1)
+        query = self.query_projection(self.hidden_norm(hidden_state)).view(
+            hidden_state.shape[0],
+            self.config.num_scem_queries,
+            self.config.context_dim,
+        )
+        query = query + self.query_slot_embedding.unsqueeze(0).to(dtype=query.dtype, device=query.device)
         key_value = self.memory_projection(memory)
-        context, attention_weights = self.cross_attention(
+        if bool((~active_state).any()):
+            key_value = key_value.masked_fill((~active_state).view(-1, 1, 1), 0.0)
+        context_tokens, attention_weights = self.cross_attention(
             query=query,
             key=key_value,
             value=key_value,
             need_weights=return_attention,
             average_attn_weights=False,
         )
-        context = context.squeeze(1)
+        context = self.context_projection(context_tokens.reshape(context_tokens.shape[0], -1))
+        if bool((~active_state).any()):
+            active_scale = active_state.to(dtype=context.dtype).view(-1, 1)
+            context = context * active_scale
         bias, fused = self.bias_head(hidden_state, context)
+        if bool((~active_state).any()):
+            active_scale = active_state.to(dtype=bias.dtype).view(-1, 1)
+            bias = bias * active_scale
+            fused = fused * active_scale.to(dtype=fused.dtype)
         return SCEMBiasOutput(
             bias=bias,
             context=context,

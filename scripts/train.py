@@ -64,21 +64,11 @@ def parse_args():
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--warmup-ratio", type=float, default=0.03)
     parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--bias-rank", type=int, default=64)
-    parser.add_argument("--state-gate-scale", type=float, default=1.0)
-    parser.add_argument("--state-shift-scale", type=float, default=1.0)
-    parser.add_argument("--ast-dim", type=int, default=256)
-    parser.add_argument("--ast-ffn-dim", type=int, default=512)
-    parser.add_argument("--ast-layers", type=int, default=3)
-    parser.add_argument("--ast-heads", type=int, default=4)
-    parser.add_argument("--ast-memory-slots", type=int, default=16)
-    parser.add_argument("--ast-node-type-vocab-size", type=int, default=4096)
-    parser.add_argument("--ast-edge-type-vocab-size", type=int, default=1024)
-    parser.add_argument("--ast-text-vocab-size", type=int, default=8192)
-    parser.add_argument("--ast-max-nodes", type=int, default=512)
-    parser.add_argument("--ast-max-edges", type=int, default=2048)
-    parser.add_argument("--ast-max-depth", type=int, default=64)
-    parser.add_argument("--ast-max-child-index", type=int, default=64)
+    parser.add_argument(
+        "--ast-cache-dir",
+        default="train_outputs/ast_cache",
+        help="Directory for cached AST graph tensors. Set to empty string to disable.",
+    )
     parser.add_argument(
         "--state-contrastive-weight",
         type=float,
@@ -448,35 +438,22 @@ def resolve_model_dtype(args, accelerator: Accelerator) -> torch.dtype:
 
 
 def build_scem_config(args, lm_config) -> SCEMConfig:
-    return SCEMConfig.from_lm_config(
-        lm_config,
-        bias_rank=args.bias_rank,
-        state_gate_scale=args.state_gate_scale,
-        state_shift_scale=args.state_shift_scale,
-        ast_dim=args.ast_dim,
-        ast_ffn_dim=args.ast_ffn_dim,
-        ast_layers=args.ast_layers,
-        ast_heads=args.ast_heads,
-        ast_memory_slots=args.ast_memory_slots,
-        ast_node_type_vocab_size=args.ast_node_type_vocab_size,
-        ast_edge_type_vocab_size=args.ast_edge_type_vocab_size,
-        ast_text_vocab_size=args.ast_text_vocab_size,
-        ast_max_nodes=args.ast_max_nodes,
-        ast_max_edges=args.ast_max_edges,
-        ast_max_depth=args.ast_max_depth,
-        ast_max_child_index=args.ast_max_child_index,
-    )
+    return SCEMConfig.from_lm_config(lm_config)
 
 
-def build_ast_extractor(args) -> CudaASTGraphExtractor:
+def build_ast_extractor(config: SCEMConfig, args) -> CudaASTGraphExtractor:
+    cache_dir = args.ast_cache_dir.strip() if getattr(args, "ast_cache_dir", None) else None
     return CudaASTGraphExtractor(
-        max_nodes=args.ast_max_nodes,
-        max_edges=args.ast_max_edges,
-        node_type_vocab_size=args.ast_node_type_vocab_size,
-        edge_type_vocab_size=args.ast_edge_type_vocab_size,
-        text_vocab_size=args.ast_text_vocab_size,
-        max_depth=args.ast_max_depth,
-        max_child_index=args.ast_max_child_index,
+        max_nodes=config.ast_max_nodes,
+        max_edges=config.ast_max_edges,
+        node_type_vocab_size=config.ast_node_type_vocab_size,
+        edge_type_vocab_size=config.ast_edge_type_vocab_size,
+        text_vocab_size=config.ast_text_vocab_size,
+        max_depth=config.ast_max_depth,
+        max_child_index=config.ast_max_child_index,
+        node_flag_dim=config.ast_node_flag_dim,
+        node_position_dim=config.ast_node_position_dim,
+        cache_dir=cache_dir,
     )
 
 
@@ -842,7 +819,7 @@ def main():
     total_steps = max(1, total_steps)
     warmup_steps = int(total_steps * args.warmup_ratio)
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
-    extractor = build_ast_extractor(args)
+    extractor = build_ast_extractor(scem_config, args)
     train_logger = None
     if accelerator.is_main_process:
         train_logger = TrainingRunLogger(

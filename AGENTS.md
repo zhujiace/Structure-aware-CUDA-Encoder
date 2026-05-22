@@ -34,6 +34,7 @@ scem/
   states.py
 
 scripts/
+  cuda_ast_viewer.py
   demo.py
   eval.py
   harness_eval.py
@@ -61,6 +62,7 @@ These are first-class project files and should be kept clean and well-structured
 - `scem/states.py`
 - `scem/decoding.py`
 - `scem/qwen_integration.py`
+- `scripts/cuda_ast_viewer.py`
 - `scripts/train.py`
 - `scripts/eval.py`
 - `scripts/harness_eval.py`
@@ -199,7 +201,9 @@ Important behavior:
 - Supports `.json` and `.jsonl`.
 - Uses region anchors plus random points for next-token training.
 - CUDA state extraction is AST-graph based. Training state uses the assistant/completion prefix, and generation state strips the fixed prompt/chat input before parsing with `tree_sitter_cuda`. Do not reintroduce global `task_family` / `tensor_rank` fields or the old hand-written CUDA metric vector unless the user explicitly asks for that design.
-- AST graph extraction emits parser-native node/edge IDs with hash embeddings, padded by `--ast-max-nodes` and `--ast-max-edges`. The SCEM model encodes these graphs with an edge-aware Graph Transformer and learned AST memory queries.
+- AST graph extraction emits parser-native node/edge IDs with hash embeddings, padded by `SCEMConfig.ast_max_nodes` and `SCEMConfig.ast_max_edges`. The SCEM model encodes these graphs with an edge-aware Graph Transformer and learned AST memory queries.
+- Model-internal SCEM defaults are set in `scem/config.py` for the 4B path (`bias_rank=256`, multi-query cross attention, AST node cap 768 / edge cap 3072). Do not re-add these as `train.py` CLI flags; edit `SCEMConfig` directly when changing architecture.
+- `--ast-cache-dir` defaults to `train_outputs/ast_cache`; pass an empty string to disable AST tensor caching.
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
 - Supports `--val-ratio` with `--var-ratio` as a compatibility alias; validation is split by raw records and used for validation loss tracking.
 - Training now saves regular `step-*` checkpoints, `final/`, and `best/` when validation is enabled.
@@ -281,6 +285,14 @@ Use it for:
 - debugging model output quality
 - checking extraction behavior
 
+### `scripts/cuda_ast_viewer.py`
+
+Purpose:
+
+- Lightweight local app for inspecting `tree_sitter_cuda` AST updates as CUDA source changes.
+- Independent of SCEM training/evaluation and does not load a language model.
+- Supports browser mode by default and `--stdin` for terminal-only AST inspection.
+
 ### `scripts/smoke_test.py`
 
 Purpose:
@@ -322,6 +334,7 @@ Each helper should have a clear responsibility.
   scripts/eval.py \
   scripts/harness_eval.py \
   utils/build_cudabench_pollution.py \
+  scripts/cuda_ast_viewer.py \
   scripts/demo.py \
   scripts/smoke_test.py
 ```
@@ -333,6 +346,7 @@ Each helper should have a clear responsibility.
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/train_two_stage.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/eval.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/harness_eval.py --help
+/home/zhujiace/anaconda3/envs/llama/bin/python scripts/cuda_ast_viewer.py --help
 /home/zhujiace/anaconda3/envs/llama/bin/python scripts/demo.py --help
 ```
 
@@ -596,7 +610,7 @@ Training and evaluation default `--alpha` to `1.0`, and normal commands should l
 
 ### Default SCEM state path is AST graph based
 
-The default SCEM state path now parses the generated CUDA prefix with `tree_sitter_cuda`, converts the full AST into a typed graph, encodes it with an edge-aware Graph Transformer, and pools learned AST memory tokens for hidden-state cross attention. The old 7-slot heuristic state encoder and `--bias-arch concat` path are no longer part of the main code path.
+The default SCEM state path now parses the generated CUDA prefix with `tree_sitter_cuda`, converts the full AST into a typed graph, encodes it with an edge-aware Graph Transformer, and pools learned AST memory tokens for multi-query hidden-state cross attention. The old 7-slot heuristic state encoder and `--bias-arch concat` path are no longer part of the main code path.
 
 Training defaults include a true-state vs corrupted-state margin term (`--state-contrastive-weight`, `--state-contrastive-margin`, `--state-contrastive-mode`) so SCEM is explicitly pressured to make the correct CUDA state outperform a corrupted state. Use `--state-contrastive-weight 0` only for ablation/debug runs.
 
@@ -607,7 +621,7 @@ It expands each CUDA example into multiple next-token points based on region anc
 
 ### AST state extractor uses generated prefix
 
-The current SCEM state no longer includes manually supplied task-family or tensor-rank fields, heuristic static flags, or normalized scalar CUDA metrics. Dynamic code state is derived from the active generated CUDA code block/prefix. Tree-sitter error and missing nodes are preserved because incomplete prefixes are meaningful generation states.
+The current SCEM state no longer includes manually supplied task-family or tensor-rank fields, heuristic static flags, or normalized scalar CUDA metrics. Dynamic code state is derived from the active generated CUDA code block/prefix. Pure text before CUDA code starts is represented as an inactive AST state, and SCEM masks inactive states to zero bias so it does not affect non-code phases. Tree-sitter error/missing nodes plus cursor/frontier features are preserved because incomplete prefixes are meaningful generation states.
 
 Current SCEM checkpoints must be retrained after this AST graph architecture change. Checkpoints trained with heuristic state tensors or the old concat/state-gated-delta modules are incompatible.
 
@@ -634,7 +648,8 @@ After any meaningful script change, run at least:
 ```bash
 /home/zhujiace/anaconda3/envs/llama/bin/python -B -m py_compile \
   scripts/utils.py scripts/train.py scripts/eval.py scripts/harness_eval.py \
-  scripts/train_two_stage.py utils/build_cudabench_pollution.py scripts/demo.py scripts/smoke_test.py
+  scripts/train_two_stage.py utils/build_cudabench_pollution.py scripts/cuda_ast_viewer.py \
+  scripts/demo.py scripts/smoke_test.py
 ```
 
 Then run the relevant entrypoint help or smoke command.
@@ -645,6 +660,7 @@ Examples:
 - changed two-stage training: run `scripts/train_two_stage.py --help`
 - changed standalone evaluation: run `scripts/eval.py --help`
 - changed harness evaluation: run `scripts/harness_eval.py --help`
+- changed CUDA AST viewer: run `scripts/cuda_ast_viewer.py --help`
 - changed CUDABench pollution conversion: run `utils/build_cudabench_pollution.py --help`
 - changed demo path: run `scripts/demo.py --help`
 - changed SCEM core: run `scripts/smoke_test.py`

@@ -34,6 +34,8 @@ def main():
         text_vocab_size=config.ast_text_vocab_size,
         max_depth=config.ast_max_depth,
         max_child_index=config.ast_max_child_index,
+        node_flag_dim=config.ast_node_flag_dim,
+        node_position_dim=config.ast_node_position_dim,
     )
     batch = extractor.extract_batch(
         [

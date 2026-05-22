@@ -75,21 +75,11 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=1, help="Raw examples per batch.")
     parser.add_argument("--grad-accum-steps", type=int, default=32)
     parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--bias-rank", type=int, default=64)
-    parser.add_argument("--state-gate-scale", type=float, default=1.0)
-    parser.add_argument("--state-shift-scale", type=float, default=1.0)
-    parser.add_argument("--ast-dim", type=int, default=256)
-    parser.add_argument("--ast-ffn-dim", type=int, default=512)
-    parser.add_argument("--ast-layers", type=int, default=3)
-    parser.add_argument("--ast-heads", type=int, default=4)
-    parser.add_argument("--ast-memory-slots", type=int, default=16)
-    parser.add_argument("--ast-node-type-vocab-size", type=int, default=4096)
-    parser.add_argument("--ast-edge-type-vocab-size", type=int, default=1024)
-    parser.add_argument("--ast-text-vocab-size", type=int, default=8192)
-    parser.add_argument("--ast-max-nodes", type=int, default=512)
-    parser.add_argument("--ast-max-edges", type=int, default=2048)
-    parser.add_argument("--ast-max-depth", type=int, default=64)
-    parser.add_argument("--ast-max-child-index", type=int, default=64)
+    parser.add_argument(
+        "--ast-cache-dir",
+        default="train_outputs/ast_cache",
+        help="Directory for cached AST graph tensors. Set to empty string to disable.",
+    )
     parser.add_argument(
         "--state-contrastive-weight",
         type=float,
@@ -851,7 +841,7 @@ def main():
     if adapt_val_loader is not None:
         adapt_val_loader = prepared[offset]
 
-    extractor = build_ast_extractor(args)
+    extractor = build_ast_extractor(scem_config, args)
     log_initial_validation(
         model=model,
         scem=scem,
