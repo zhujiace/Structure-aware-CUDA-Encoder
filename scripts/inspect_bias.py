@@ -4,6 +4,7 @@ import json
 import math
 import random
 import sys
+from collections import Counter
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -21,6 +22,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from scem import CudaASTGraphBatch, CudaASTGraphExtractor, SCEMConfig, SCEModule
+from scem.states import GENERATED_PREFIX_MARKER
 from train import PrefixCollator, PrefixNextTokenDataset, get_lm_config, split_train_validation_records
 
 
@@ -48,6 +50,12 @@ def parse_args():
     parser.add_argument("--skip-overlength", action="store_true")
     parser.add_argument("--region-points-per-example", type=int, default=8)
     parser.add_argument("--random-points-per-example", type=int, default=2)
+    parser.add_argument(
+        "--code-only",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Inspect only target tokens inside the generated fenced CUDA/C++ code block. Use --no-code-only for legacy full-output inspection.",
+    )
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--alpha", type=float, default=1.0)
@@ -152,10 +160,31 @@ def build_dataloader(args, tokenizer):
         region_points_per_example=args.region_points_per_example,
         random_points_per_example=args.random_points_per_example,
         skip_overlength=args.skip_overlength,
-        max_training_points=args.max_points,
+        max_training_points=None if args.code_only else args.max_points,
         records=records,
         split_name=f"inspect-{args.split}",
     )
+    if args.code_only:
+        original_count = len(dataset.examples)
+        filtered_examples = []
+        skip_reasons = Counter()
+        for example in dataset.examples:
+            reason = code_target_skip_reason(example, tokenizer)
+            if reason is None:
+                filtered_examples.append(example)
+            else:
+                skip_reasons[reason] += 1
+        dataset.examples = filtered_examples
+        if args.max_points is not None:
+            dataset.examples = dataset.examples[: args.max_points]
+        if not dataset.examples:
+            reason_text = ", ".join(f"{key}={value}" for key, value in sorted(skip_reasons.items()))
+            raise ValueError(f"No code-only inspect points found; skipped {original_count} points ({reason_text})")
+        print(
+            f"Filtered inspect points to {len(dataset.examples)}/{original_count} code targets; "
+            f"skipped {sum(skip_reasons.values())} non-code targets ({dict(sorted(skip_reasons.items()))})",
+            flush=True,
+        )
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -164,6 +193,29 @@ def build_dataloader(args, tokenizer):
         num_workers=0,
     )
     return dataloader, dataset, len(dataset), train_count, val_count
+
+
+def code_target_skip_reason(example, tokenizer) -> Optional[str]:
+    """Return None when the next token is inside fenced code; otherwise explain why it was skipped."""
+
+    state_prefix = example.state_prefix
+    if GENERATED_PREFIX_MARKER not in state_prefix:
+        return "missing_generated_prefix_marker"
+    generated_prefix = state_prefix.rsplit(GENERATED_PREFIX_MARKER, 1)[1]
+    fence_start = generated_prefix.find("```")
+    if fence_start < 0:
+        return "no_opening_code_fence"
+    fence_line_end = generated_prefix.find("\n", fence_start)
+    if fence_line_end < 0:
+        return "inside_opening_code_fence"
+    code_prefix = generated_prefix[fence_line_end + 1 :]
+    if "```" in code_prefix:
+        return "after_closing_code_fence"
+
+    label_text = tokenizer.decode([example.ids[example.target_pos]], skip_special_tokens=False)
+    if label_text.startswith("`"):
+        return "closing_code_fence_token"
+    return None
 
 
 class RunningStats:
