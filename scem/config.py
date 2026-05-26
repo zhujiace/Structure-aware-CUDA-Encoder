@@ -30,8 +30,6 @@ class SCEMConfig:
     dropout: float = 0.0
     bias_rank: Optional[int] = 256
     max_bias: Optional[float] = 10.0
-    state_gate_scale: float = 1.0
-    state_shift_scale: float = 1.0
 
     @classmethod
     def from_lm_config(cls, lm_config, **kwargs) -> "SCEMConfig":

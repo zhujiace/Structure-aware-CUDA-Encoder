@@ -174,40 +174,24 @@ class CudaASTGraphEncoder(nn.Module):
         return memory
 
 
-class SCEMStateGatedBiasHead(nn.Module):
-    """State-conditioned low-rank vocabulary bias head."""
+class SCEMContextBiasHead(nn.Module):
+    """Context-only low-rank vocabulary bias head."""
 
     def __init__(self, config: SCEMConfig):
         super().__init__()
         self.config = config
         self.rank_dim = config.bias_rank or config.context_dim
-        self.state_gate_scale = config.state_gate_scale
-        self.state_shift_scale = config.state_shift_scale
-        self.hidden_rank = nn.Sequential(
-            nn.LayerNorm(config.lm_hidden_size),
-            nn.Linear(config.lm_hidden_size, self.rank_dim),
-            nn.Tanh(),
-        )
-        self.state_rank = nn.Sequential(
+        self.rank = nn.Sequential(
             nn.LayerNorm(config.context_dim),
             nn.Linear(config.context_dim, self.rank_dim),
             nn.Tanh(),
         )
-        self.gate = nn.Sequential(
-            nn.LayerNorm(config.context_dim),
-            nn.Linear(config.context_dim, self.rank_dim),
-            nn.Tanh(),
-        )
-        self.rank_norm = nn.LayerNorm(self.rank_dim)
         self.vocab_proj = nn.Linear(self.rank_dim, config.vocab_size)
         nn.init.zeros_(self.vocab_proj.weight)
         nn.init.zeros_(self.vocab_proj.bias)
 
-    def forward(self, hidden_state: torch.Tensor, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_rank = self.hidden_rank(hidden_state)
-        state_rank = self.state_rank(context)
-        state_gate = 1.0 + self.state_gate_scale * self.gate(context)
-        rank = self.rank_norm(hidden_rank * state_gate + self.state_shift_scale * state_rank)
+    def forward(self, context: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        rank = self.rank(context)
         bias = self.vocab_proj(rank)
         if self.config.max_bias is not None:
             bias = self.config.max_bias * torch.tanh(bias / self.config.max_bias)
@@ -237,7 +221,7 @@ class SCEModule(nn.Module):
             nn.SiLU(),
             nn.Linear(config.context_dim, config.context_dim),
         )
-        self.bias_head = SCEMStateGatedBiasHead(config)
+        self.bias_head = SCEMContextBiasHead(config)
 
     def forward(
         self,
@@ -274,7 +258,7 @@ class SCEModule(nn.Module):
         if bool((~active_state).any()):
             active_scale = active_state.to(dtype=context.dtype).view(-1, 1)
             context = context * active_scale
-        bias, fused = self.bias_head(hidden_state, context)
+        bias, fused = self.bias_head(context)
         if bool((~active_state).any()):
             active_scale = active_state.to(dtype=bias.dtype).view(-1, 1)
             bias = bias * active_scale

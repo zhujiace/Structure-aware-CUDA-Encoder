@@ -52,9 +52,8 @@ At each decoding step:
 4. Encode the graph with an edge-aware Graph Transformer.
 5. Pool AST nodes into learned memory tokens `M_t`.
 6. Run cross-attention from `h_t` to `M_t`.
-7. Let the CUDA AST context gate and shift a low-rank hidden-state correction.
-6. Produce a vocab-sized bias `b_t` from the gated low-rank correction.
-7. Add `b_t` to the backbone logits.
+7. Produce a vocab-sized bias `b_t` from the cross-attended AST context.
+8. Add `b_t` to the backbone logits.
 
 The default implemented form is:
 
@@ -63,15 +62,12 @@ G_t = tree_sitter_cuda(prefix_t)
 H_t = EdgeAwareGraphTransformer(G_t)
 M_t = LearnedQueryPool(H_t)
 c_t = CrossAttention(h_t, M_t)
-r_t = tanh(W_h LN(h_t))
-g_t = 1 + s_g tanh(W_g LN(c_t))
-a_t = tanh(W_a LN(c_t))
-u_t = LN(r_t * g_t + s_a a_t)
+u_t = tanh(W_c LN(c_t))
 b_t = W_b u_t
 z_final = z_lm + b_t
 ```
 
-The AST graph encoder is part of SCEM and is trained end-to-end with the bias head. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
+The AST graph encoder is part of SCEM and is trained end-to-end with the context-only bias head. The final bias head does not receive a direct hidden-state input; the hidden state only queries AST memory through cross-attention. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
 
 ## SCEM Config Parameters
 
@@ -110,8 +106,6 @@ Bias head parameters:
 
 - `bias_rank`: low-rank bottleneck for vocab bias. `None` uses `context_dim` as the bias rank.
 - `max_bias`: clamps bias magnitude with `tanh` to avoid overwhelming the backbone logits.
-- `state_gate_scale`: scale for the AST-context multiplicative gate.
-- `state_shift_scale`: scale for the AST-context additive low-rank state path.
 
 For Hugging Face models, use:
 
@@ -146,7 +140,7 @@ Use them by passing `--model-path`:
   --use-scem-prompt
 ```
 
-SCEM checkpoints are architecture- and backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same. Checkpoints trained before the AST graph encoder are not compatible with the current SCEM architecture and must be retrained.
+SCEM checkpoints are architecture- and backbone-shape specific. A checkpoint trained with Qwen3.5-0.8B cannot be loaded with Qwen3.5-4B or Qwen3.5-9B because the hidden-state dimension changes, even though the tokenizer vocabulary size is the same. Checkpoints trained before the AST graph encoder or before the context-only bias head are not compatible with the current SCEM architecture and must be retrained.
 
 ## CUDA State Extraction
 

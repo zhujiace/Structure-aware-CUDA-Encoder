@@ -590,7 +590,7 @@ This means the next likely tasks are:
 
 These are intentional and should not be changed casually.
 
-### SCEM integration uses last hidden state only
+### SCEM integration uses the last hidden state as an AST-memory query
 
 Current design uses the last layer, last token hidden state:
 
@@ -598,7 +598,7 @@ Current design uses the last layer, last token hidden state:
 hidden_states[-1][:, -1, :]
 ```
 
-This was a deliberate choice for simplicity, cost, and consistency with the next-token logits.
+This was a deliberate choice for simplicity, cost, and consistency with the next-token logits. The final bias head is context-only: hidden state queries AST memory through cross-attention, but there is no direct `hidden_state -> vocab bias` branch.
 
 ### Decoding path uses Hugging Face `LogitsProcessor`
 
@@ -610,7 +610,7 @@ Training and evaluation default `--alpha` to `1.0`, and normal commands should l
 
 ### Default SCEM state path is AST graph based
 
-The default SCEM state path now parses the generated CUDA prefix with `tree_sitter_cuda`, converts the full AST into a typed graph, encodes it with an edge-aware Graph Transformer, and pools learned AST memory tokens for multi-query hidden-state cross attention. The old 7-slot heuristic state encoder and `--bias-arch concat` path are no longer part of the main code path.
+The default SCEM state path now parses the generated CUDA prefix with `tree_sitter_cuda`, converts the full AST into a typed graph, encodes it with an edge-aware Graph Transformer, and pools learned AST memory tokens for multi-query hidden-state cross attention. The context-only bias head reads the cross-attended AST context rather than directly reading hidden state. The old 7-slot heuristic state encoder and `--bias-arch concat` path are no longer part of the main code path.
 
 Training defaults include a true-state vs corrupted-state margin term (`--state-contrastive-weight`, `--state-contrastive-margin`, `--state-contrastive-mode`) so SCEM is explicitly pressured to make the correct CUDA state outperform a corrupted state. Use `--state-contrastive-weight 0` only for ablation/debug runs.
 
@@ -623,7 +623,7 @@ It expands each CUDA example into multiple next-token points based on region anc
 
 The current SCEM state no longer includes manually supplied task-family or tensor-rank fields, heuristic static flags, or normalized scalar CUDA metrics. Dynamic code state is derived from the active generated CUDA code block/prefix. Pure text before CUDA code starts is represented as an inactive AST state, and SCEM masks inactive states to zero bias so it does not affect non-code phases. Tree-sitter error/missing nodes plus cursor/frontier features are preserved because incomplete prefixes are meaningful generation states.
 
-Current SCEM checkpoints must be retrained after this AST graph architecture change. Checkpoints trained with heuristic state tensors or the old concat/state-gated-delta modules are incompatible.
+Current SCEM checkpoints must be retrained after this AST graph and context-only bias-head architecture change. Checkpoints trained with heuristic state tensors or the old concat/state-gated-delta/state-gated bias modules are incompatible.
 
 ## Code Style and Editing Rules
 
