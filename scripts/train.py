@@ -56,7 +56,15 @@ def parse_args():
         help="Fraction of raw records reserved for validation. --var-ratio is accepted as a compatibility alias.",
     )
     parser.add_argument("--region-points-per-example", type=int, default=8)
-    parser.add_argument("--random-points-per-example", type=int, default=2)
+    parser.add_argument(
+        "--random-points-per-example",
+        type=int,
+        default=2,
+        help=(
+            "Compatibility name: add this many deterministic, evenly spaced code-block "
+            "targets per raw sample. train.py no longer samples random non-code targets."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum-steps", type=int, default=8)
     parser.add_argument("--epochs", type=int, default=1)
@@ -106,6 +114,8 @@ REGION_ANCHORS = {
     "write_back": ("] =", "]=", "atomicAdd", "atomicMax", "atomicMin"),
     "statement_close": (";", "}"),
 }
+
+STRUCTURE_TOKENS = (";", "{", "}", "(", ")", "[", "]", ",", "=", "+", "-", "*", "/", "<", ">", "&", "|")
 
 
 @dataclass(frozen=True)
@@ -280,35 +290,41 @@ class PrefixNextTokenDataset(Dataset):
         min_target_pos = max(self.min_prefix_length, min_target_pos)
         if min_target_pos >= len(ids):
             return []
+        code_spans = self._code_spans(text, target_char_start)
+        if not code_spans:
+            return []
         for region, anchors in REGION_ANCHORS.items():
-            for anchor in anchors:
-                char_pos = text.find(anchor, target_char_start)
-                if char_pos < 0:
-                    continue
+            for char_pos, anchor in self._iter_anchor_hits(text, anchors, code_spans):
                 anchor_end = min(len(text) - 1, char_pos + len(anchor))
                 token_pos = self._char_to_token_pos(anchor_end, offsets)
-                if self._is_valid_target(token_pos, ids, min_target_pos) and token_pos not in seen:
+                if self._is_valid_code_target(token_pos, ids, offsets, min_target_pos, code_spans) and token_pos not in seen:
                     positions.append((token_pos, region))
                     seen.add(token_pos)
                 break
 
-        positions = positions[: self.region_points_per_example]
-
-        random_budget = self.random_points_per_example
-        if random_budget > 0:
-            valid_range = range(min_target_pos, len(ids))
-            random_positions = random.sample(
-                list(valid_range),
-                k=min(random_budget, max(0, len(ids) - min_target_pos)),
-            )
-            for token_pos in random_positions:
+        structure_budget = max(0, self.region_points_per_example - len(positions))
+        if structure_budget > 0:
+            for token_pos in self._structure_token_positions(text, ids, offsets, min_target_pos, code_spans):
                 if token_pos not in seen:
-                    positions.append((token_pos, "random"))
+                    positions.append((token_pos, "structure"))
+                    seen.add(token_pos)
+                if len(positions) >= self.region_points_per_example:
+                    break
+
+        # Keep the legacy CLI field but make training deterministic and code-only:
+        # these are evenly spaced code targets, not random assistant-output targets.
+        deterministic_budget = max(0, self.random_points_per_example)
+        if deterministic_budget > 0:
+            for token_pos in self._deterministic_code_positions(ids, offsets, min_target_pos, code_spans, deterministic_budget):
+                if token_pos not in seen:
+                    positions.append((token_pos, "code_even"))
                     seen.add(token_pos)
 
         if not positions:
-            fallback = random.randint(min_target_pos, len(ids) - 1)
-            positions.append((fallback, "fallback"))
+            fallback = self._first_code_target(ids, offsets, min_target_pos, code_spans)
+            if fallback is None:
+                return []
+            positions.append((fallback, "code_fallback"))
 
         points = []
         for token_pos, source in positions:
@@ -324,6 +340,103 @@ class PrefixNextTokenDataset(Dataset):
                 )
             )
         return points
+
+    @staticmethod
+    def _code_spans(text: str, target_char_start: int) -> List[Tuple[int, int]]:
+        spans: List[Tuple[int, int]] = []
+        search_text = text[target_char_start:]
+        fences = list(re.finditer(r"```[^\n`]*\n?", search_text))
+        if fences:
+            for index in range(0, len(fences), 2):
+                start = target_char_start + fences[index].end()
+                end = target_char_start + fences[index + 1].start() if index + 1 < len(fences) else len(text)
+                if start < end:
+                    spans.append((start, end))
+            return spans
+
+        marker_positions = [
+            text.find(marker, target_char_start)
+            for marker in ("__global__", "__device__", "__host__", "#include")
+            if text.find(marker, target_char_start) >= 0
+        ]
+        if marker_positions:
+            spans.append((min(marker_positions), len(text)))
+        return spans
+
+    @staticmethod
+    def _char_in_spans(char_pos: int, spans: Sequence[Tuple[int, int]]) -> bool:
+        return any(start <= char_pos < end for start, end in spans)
+
+    @classmethod
+    def _iter_anchor_hits(
+        cls,
+        text: str,
+        anchors: Sequence[str],
+        code_spans: Sequence[Tuple[int, int]],
+    ) -> List[Tuple[int, str]]:
+        hits: List[Tuple[int, str]] = []
+        for span_start, span_end in code_spans:
+            for anchor in anchors:
+                char_pos = text.find(anchor, span_start, span_end)
+                if char_pos >= 0:
+                    hits.append((char_pos, anchor))
+                    break
+        return sorted(hits, key=lambda item: item[0])
+
+    def _structure_token_positions(
+        self,
+        text: str,
+        ids: List[int],
+        offsets: Sequence[Tuple[int, int]],
+        min_target_pos: int,
+        code_spans: Sequence[Tuple[int, int]],
+    ) -> List[int]:
+        positions: List[int] = []
+        for index, (start, end) in enumerate(offsets):
+            if not self._is_valid_code_target(index, ids, offsets, min_target_pos, code_spans):
+                continue
+            token_text = text[start:end].strip()
+            if not token_text:
+                continue
+            if token_text in STRUCTURE_TOKENS or any(item in token_text for item in STRUCTURE_TOKENS):
+                positions.append(index)
+        return positions
+
+    def _deterministic_code_positions(
+        self,
+        ids: List[int],
+        offsets: Sequence[Tuple[int, int]],
+        min_target_pos: int,
+        code_spans: Sequence[Tuple[int, int]],
+        budget: int,
+    ) -> List[int]:
+        candidates = [
+            index
+            for index in range(min_target_pos, len(ids))
+            if self._is_valid_code_target(index, ids, offsets, min_target_pos, code_spans)
+        ]
+        if not candidates or budget <= 0:
+            return []
+        if len(candidates) <= budget:
+            return candidates
+        if budget == 1:
+            return [candidates[len(candidates) // 2]]
+        return [
+            candidates[round(index * (len(candidates) - 1) / (budget - 1))]
+            for index in range(budget)
+        ]
+
+    def _first_code_target(
+        self,
+        ids: List[int],
+        offsets: Sequence[Tuple[int, int]],
+        min_target_pos: int,
+        code_spans: Sequence[Tuple[int, int]],
+    ) -> Optional[int]:
+        for index in range(min_target_pos, len(ids)):
+            if self._is_valid_code_target(index, ids, offsets, min_target_pos, code_spans):
+                return index
+        return None
 
     def _char_to_token_pos(
         self,
@@ -341,6 +454,24 @@ class PrefixNextTokenDataset(Dataset):
         if token_pos is None:
             return False
         return min_target_pos <= token_pos < len(ids)
+
+    def _is_valid_code_target(
+        self,
+        token_pos: Optional[int],
+        ids: List[int],
+        offsets: Sequence[Tuple[int, int]],
+        min_target_pos: int,
+        code_spans: Sequence[Tuple[int, int]],
+    ) -> bool:
+        if not self._is_valid_target(token_pos, ids, min_target_pos):
+            return False
+        assert token_pos is not None
+        if token_pos >= len(offsets):
+            return False
+        start, end = offsets[token_pos]
+        if start == end:
+            return False
+        return self._char_in_spans(start, code_spans)
 
 
 @dataclass

@@ -161,17 +161,42 @@ class CudaASTGraphEncoder(nn.Module):
             safe_node_mask[~active_graph, 0] = True
 
         queries = self.memory_queries.unsqueeze(0).expand(hidden.shape[0], -1, -1).to(dtype=hidden.dtype)
-        memory, _ = self.memory_attention(
+        global_memory, _ = self.memory_attention(
             query=queries,
             key=hidden,
             value=hidden,
             key_padding_mask=~safe_node_mask,
             need_weights=False,
         )
+        frontier_memory, frontier_mask = self._frontier_memory(hidden, graph)
+        memory = torch.cat([global_memory, frontier_memory], dim=1)
         memory = self.memory_projection(memory)
+        if bool((~frontier_mask).any()):
+            global_mask = active_graph.view(-1, 1).expand(-1, self.config.ast_memory_slots)
+            memory_mask = torch.cat([global_mask, frontier_mask], dim=1)
+            memory = memory * memory_mask.unsqueeze(-1).to(dtype=memory.dtype)
         if bool((~active_graph).any()):
             memory = memory.masked_fill((~active_graph).view(-1, 1, 1), 0.0)
         return memory
+
+    @staticmethod
+    def _frontier_memory(hidden: torch.Tensor, graph: CudaASTGraphBatch) -> tuple[torch.Tensor, torch.Tensor]:
+        flags = graph.node_flags.to(device=hidden.device, dtype=hidden.dtype)
+        node_mask = graph.node_mask.to(device=hidden.device)
+        cursor_mask = node_mask & flags[:, :, 3].gt(0.5) if flags.shape[-1] > 3 else node_mask.new_zeros(node_mask.shape)
+        ancestor_mask = node_mask & flags[:, :, 4].gt(0.5) if flags.shape[-1] > 4 else node_mask.new_zeros(node_mask.shape)
+        cursor_token = CudaASTGraphEncoder._masked_mean(hidden, cursor_mask)
+        ancestor_token = CudaASTGraphEncoder._masked_mean(hidden, ancestor_mask)
+        frontier = torch.stack([cursor_token, ancestor_token], dim=1)
+        frontier_mask = torch.stack([cursor_mask.any(dim=1), ancestor_mask.any(dim=1)], dim=1)
+        return frontier, frontier_mask
+
+    @staticmethod
+    def _masked_mean(hidden: torch.Tensor, mask: torch.BoolTensor) -> torch.Tensor:
+        weights = mask.unsqueeze(-1).to(dtype=hidden.dtype)
+        total = (hidden * weights).sum(dim=1)
+        denom = weights.sum(dim=1).clamp_min(1.0)
+        return total / denom
 
 
 class SCEMContextBiasHead(nn.Module):

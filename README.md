@@ -50,7 +50,7 @@ At each decoding step:
 2. Decode the generated assistant/code prefix and parse it with `tree_sitter_cuda`.
 3. Convert the full AST into a typed graph with node and edge embeddings.
 4. Encode the graph with an edge-aware Graph Transformer.
-5. Pool AST nodes into learned memory tokens `M_t`.
+5. Pool AST nodes into learned global memory tokens and explicit frontier memory tokens for the cursor node and cursor ancestors.
 6. Run cross-attention from `h_t` to `M_t`.
 7. Produce a vocab-sized bias `b_t` from the cross-attended AST context.
 8. Add `b_t` to the backbone logits.
@@ -60,14 +60,16 @@ The default implemented form is:
 ```text
 G_t = tree_sitter_cuda(prefix_t)
 H_t = EdgeAwareGraphTransformer(G_t)
-M_t = LearnedQueryPool(H_t)
+M_global = LearnedQueryPool(H_t)
+M_frontier = Pool(cursor_node(H_t), cursor_ancestors(H_t))
+M_t = concat(M_global, M_frontier)
 c_t = CrossAttention(h_t, M_t)
 u_t = tanh(W_c LN(c_t))
 b_t = W_b u_t
 z_final = z_lm + b_t
 ```
 
-The AST graph encoder is part of SCEM and is trained end-to-end with the context-only bias head. The final bias head does not receive a direct hidden-state input; the hidden state only queries AST memory through cross-attention. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
+The AST graph encoder is part of SCEM and is trained end-to-end with the context-only bias head. The final bias head does not receive a direct hidden-state input; the hidden state only queries AST memory through cross-attention. The returned memory has `ast_memory_slots + 2` slots: learned global AST slots plus cursor-node and cursor-ancestor frontier slots. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
 
 ## SCEM Config Parameters
 
@@ -497,7 +499,7 @@ __syncthreads
 ;, }
 ```
 
-Additional random points are added as regularization. For prompt/completion, messages, and instruction/output records, SCEM state extraction uses only the assistant/completion prefix, not the user prompt.
+`scripts/train.py` now expands only targets inside the generated CUDA/C++ code region. It uses region anchors, structure tokens such as brackets and statement punctuation, and deterministic evenly spaced code targets; it no longer samples random non-code assistant tokens. For prompt/completion, messages, and instruction/output records, SCEM state extraction uses only the assistant/completion prefix, not the user prompt.
 
 ### Two-stage SCEM Training
 
@@ -545,7 +547,7 @@ input
 output
 ```
 
-All checked records include a CUDA code fence, `__global__`, and `cuda_runtime.h`. With the default region-aware settings, it expands to about 45k training points.
+All checked records include a CUDA code fence, `__global__`, and `cuda_runtime.h`. With the default code-only structure-heavy settings, it expands to roughly the same order of training points as the previous region-aware setup, but the exact count depends on structure-token coverage and filtering.
 
 Token lengths are often above 2048. Measured with the Qwen3.5 tokenizer:
 
@@ -689,7 +691,7 @@ Data and sequence:
 - `--train-run-name`: optional run subdirectory name under `--train-output-dir/<model-name>`.
 - `--min-prefix-length`: minimum prefix length before a target token can be sampled.
 - `--region-points-per-example`: max region-aware points per raw sample.
-- `--random-points-per-example`: random points per raw sample.
+- `--random-points-per-example`: compatibility name for deterministic, evenly spaced code-block targets per raw sample. `scripts/train.py` no longer samples random non-code targets.
 
 Optimization:
 
