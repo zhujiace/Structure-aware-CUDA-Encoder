@@ -719,6 +719,8 @@ loss = CE(z_lm + b(true_state), y)
 
 `zero_all` is the default corrupted state because common training commands use batch size 1, where in-batch shuffling would otherwise be ineffective.
 
+For post-training bias inspection, `scripts/inspect_bias.py --state-ablation` supports `true`, `zero_all`, `blank`, and `shuffled`. Use `blank` when you need a truly inactive SCEM state with all node and edge masks cleared; `zero_all` keeps the graph active while clearing AST features.
+
 Backbone:
 
 - `--freeze-backbone / --no-freeze-backbone`: freeze or unfreeze backbone parameters.

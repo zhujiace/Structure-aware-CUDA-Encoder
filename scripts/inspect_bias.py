@@ -74,9 +74,14 @@ def parse_args():
     parser.add_argument(
         "--state-ablation",
         action="append",
-        choices=["true", "zero_all", "shuffled"],
+        choices=["true", "zero_all", "blank", "shuffled"],
         default=None,
-        help="State variant to evaluate. Can be passed multiple times. Default: true.",
+        help=(
+            "State variant to evaluate. true uses the extracted AST graph; zero_all clears "
+            "features but keeps the node mask active; blank clears features and masks so "
+            "SCEM sees an inactive state; shuffled uses another prefix. Can be passed "
+            "multiple times. Default: true."
+        ),
     )
     parser.add_argument(
         "--shuffle-offset",
@@ -407,7 +412,27 @@ def make_state_batch_for_ablation(
         return extractor.extract_batch(shuffled_prefixes, device=device)
     if mode == "zero_all":
         return true_batch.zero_like()
+    if mode == "blank":
+        return blank_state_batch_like(true_batch)
     raise ValueError(f"Unsupported state ablation: {mode}")
+
+
+def blank_state_batch_like(state_batch: CudaASTGraphBatch) -> CudaASTGraphBatch:
+    """Return a truly inactive state batch for testing state dependence."""
+
+    return CudaASTGraphBatch(
+        node_type_ids=torch.zeros_like(state_batch.node_type_ids),
+        node_text_ids=torch.zeros_like(state_batch.node_text_ids),
+        node_depths=torch.zeros_like(state_batch.node_depths),
+        node_child_indices=torch.zeros_like(state_batch.node_child_indices),
+        node_flags=torch.zeros_like(state_batch.node_flags),
+        node_positions=torch.zeros_like(state_batch.node_positions),
+        node_mask=torch.zeros_like(state_batch.node_mask),
+        edge_sources=torch.zeros_like(state_batch.edge_sources),
+        edge_targets=torch.zeros_like(state_batch.edge_targets),
+        edge_type_ids=torch.zeros_like(state_batch.edge_type_ids),
+        edge_mask=torch.zeros_like(state_batch.edge_mask),
+    )
 
 
 def make_extractor_from_config(config: SCEMConfig) -> CudaASTGraphExtractor:
