@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -62,8 +63,14 @@ def parse_args():
         default=2,
         help=(
             "Compatibility name: add this many deterministic, evenly spaced code-block "
-            "targets per raw sample. train.py no longer samples random non-code targets."
+            "targets per raw sample."
         ),
+    )
+    parser.add_argument(
+        "--non-code-points-per-example",
+        type=int,
+        default=2,
+        help="Add this many deterministic random assistant non-code targets per raw sample.",
     )
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum-steps", type=int, default=8)
@@ -89,6 +96,30 @@ def parse_args():
         choices=["none", "zero_all", "shuffle", "both"],
         default="zero_all",
         help="Corrupted state used by the contrastive loss. shuffle falls back to zero_all for batch size 1.",
+    )
+    parser.add_argument(
+        "--non-code-loss-weight",
+        type=float,
+        default=0.25,
+        help="Weight for CE on non-code targets, where AST state is usually blank.",
+    )
+    parser.add_argument(
+        "--non-code-kl-weight",
+        type=float,
+        default=1.0,
+        help="Weight for KL(base || SCEM-adjusted) on non-code targets to avoid damaging normal generation.",
+    )
+    parser.add_argument(
+        "--non-code-bias-l2-weight",
+        type=float,
+        default=0.01,
+        help="Mean-square bias penalty on non-code targets.",
+    )
+    parser.add_argument(
+        "--allow-raw-code-state-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow AST state extraction from line-start raw CUDA code when no open markdown code fence is present.",
     )
     parser.add_argument("--save-steps", type=int, default=500)
     parser.add_argument("--log-steps", type=int, default=20)
@@ -124,6 +155,7 @@ class TrainingPoint:
     target_pos: int
     source: str
     state_prefix: str
+    is_code: bool
 
 
 class PrefixNextTokenDataset(Dataset):
@@ -137,6 +169,7 @@ class PrefixNextTokenDataset(Dataset):
         min_prefix_length: int,
         region_points_per_example: int,
         random_points_per_example: int,
+        non_code_points_per_example: int = 0,
         skip_overlength: bool = False,
         max_raw_examples: Optional[int] = None,
         max_training_points: Optional[int] = None,
@@ -148,6 +181,7 @@ class PrefixNextTokenDataset(Dataset):
         self.min_prefix_length = min_prefix_length
         self.region_points_per_example = region_points_per_example
         self.random_points_per_example = random_points_per_example
+        self.non_code_points_per_example = non_code_points_per_example
         self.examples = []
         raw_examples = 0
         skipped_overlength = 0
@@ -188,7 +222,10 @@ class PrefixNextTokenDataset(Dataset):
                 break
         if not self.examples:
             raise ValueError("No usable training examples found")
+        code_points = sum(1 for point in self.examples if point.is_code)
+        non_code_points = len(self.examples) - code_points
         message = f"Loaded {len(self.examples)} {split_name} points from {raw_examples} raw examples"
+        message += f" ({code_points} code, {non_code_points} non-code)"
         if skipped_overlength:
             message += f" ({skipped_overlength} overlength examples skipped)"
         print(message)
@@ -275,6 +312,7 @@ class PrefixNextTokenDataset(Dataset):
             "label": point.ids[point.target_pos],
             "source": point.source,
             "state_prefix": point.state_prefix,
+            "is_code": point.is_code,
         }
 
     def _build_training_points(
@@ -291,43 +329,61 @@ class PrefixNextTokenDataset(Dataset):
         if min_target_pos >= len(ids):
             return []
         code_spans = self._code_spans(text, target_char_start)
-        if not code_spans:
-            return []
-        for region, anchors in REGION_ANCHORS.items():
-            for char_pos, anchor in self._iter_anchor_hits(text, anchors, code_spans):
-                anchor_end = min(len(text) - 1, char_pos + len(anchor))
-                token_pos = self._char_to_token_pos(anchor_end, offsets)
-                if self._is_valid_code_target(token_pos, ids, offsets, min_target_pos, code_spans) and token_pos not in seen:
-                    positions.append((token_pos, region))
-                    seen.add(token_pos)
-                break
-
-        structure_budget = max(0, self.region_points_per_example - len(positions))
-        if structure_budget > 0:
-            for token_pos in self._structure_token_positions(text, ids, offsets, min_target_pos, code_spans):
-                if token_pos not in seen:
-                    positions.append((token_pos, "structure"))
-                    seen.add(token_pos)
-                if len(positions) >= self.region_points_per_example:
+        code_budget_start = len(positions)
+        if code_spans:
+            for region, anchors in REGION_ANCHORS.items():
+                for char_pos, anchor in self._iter_anchor_hits(text, anchors, code_spans):
+                    anchor_end = min(len(text) - 1, char_pos + len(anchor))
+                    token_pos = self._char_to_token_pos(anchor_end, offsets)
+                    if (
+                        self._is_valid_code_target(token_pos, ids, offsets, min_target_pos, code_spans)
+                        and token_pos not in seen
+                    ):
+                        positions.append((token_pos, region, True))
+                        seen.add(token_pos)
                     break
 
-        # Keep the legacy CLI field but make training deterministic and code-only:
-        # these are evenly spaced code targets, not random assistant-output targets.
-        deterministic_budget = max(0, self.random_points_per_example)
-        if deterministic_budget > 0:
-            for token_pos in self._deterministic_code_positions(ids, offsets, min_target_pos, code_spans, deterministic_budget):
+            structure_budget = max(0, self.region_points_per_example - (len(positions) - code_budget_start))
+            if structure_budget > 0:
+                for token_pos in self._structure_token_positions(text, ids, offsets, min_target_pos, code_spans):
+                    if token_pos not in seen:
+                        positions.append((token_pos, "structure", True))
+                        seen.add(token_pos)
+                    if len(positions) - code_budget_start >= self.region_points_per_example:
+                        break
+
+            # Keep the legacy CLI field but make the targets deterministic and code-local.
+            deterministic_budget = max(0, self.random_points_per_example)
+            if deterministic_budget > 0:
+                for token_pos in self._deterministic_code_positions(
+                    ids,
+                    offsets,
+                    min_target_pos,
+                    code_spans,
+                    deterministic_budget,
+                ):
+                    if token_pos not in seen:
+                        positions.append((token_pos, "code_even", True))
+                        seen.add(token_pos)
+
+            if len(positions) == code_budget_start:
+                fallback = self._first_code_target(ids, offsets, min_target_pos, code_spans)
+                if fallback is not None:
+                    positions.append((fallback, "code_fallback", True))
+                    seen.add(fallback)
+
+        non_code_budget = max(0, self.non_code_points_per_example)
+        if non_code_budget > 0:
+            for token_pos in self._non_code_positions(ids, offsets, min_target_pos, code_spans, non_code_budget, text):
                 if token_pos not in seen:
-                    positions.append((token_pos, "code_even"))
+                    positions.append((token_pos, "non_code", False))
                     seen.add(token_pos)
 
         if not positions:
-            fallback = self._first_code_target(ids, offsets, min_target_pos, code_spans)
-            if fallback is None:
-                return []
-            positions.append((fallback, "code_fallback"))
+            return []
 
         points = []
-        for token_pos, source in positions:
+        for token_pos, source, is_code in positions:
             prefix_end = offsets[token_pos][0] if token_pos < len(offsets) else len(text)
             prefix_end = max(target_char_start, prefix_end)
             state_prefix = text[:target_char_start] + GENERATED_PREFIX_MARKER + text[target_char_start:prefix_end]
@@ -337,6 +393,7 @@ class PrefixNextTokenDataset(Dataset):
                     target_pos=token_pos,
                     source=source,
                     state_prefix=state_prefix,
+                    is_code=is_code,
                 )
             )
         return points
@@ -354,14 +411,20 @@ class PrefixNextTokenDataset(Dataset):
                     spans.append((start, end))
             return spans
 
-        marker_positions = [
-            text.find(marker, target_char_start)
-            for marker in ("__global__", "__device__", "__host__", "#include")
-            if text.find(marker, target_char_start) >= 0
-        ]
-        if marker_positions:
-            spans.append((min(marker_positions), len(text)))
+        raw_code_start = PrefixNextTokenDataset._raw_code_start(search_text)
+        if raw_code_start is not None:
+            spans.append((target_char_start + raw_code_start, len(text)))
         return spans
+
+    @staticmethod
+    def _raw_code_start(text: str) -> Optional[int]:
+        patterns = (
+            r"(?m)^\s*#\s*include\b",
+            r"(?m)^\s*(?:extern\s+\"C\"\s+)?__(?:global__|device__|host__)\b",
+            r"(?m)^\s*template\s*<[^>\n]+>\s*(?:\n\s*)?(?:extern\s+\"C\"\s+)?__(?:global__|device__|host__)\b",
+        )
+        starts = [match.start() for pattern in patterns for match in re.finditer(pattern, text)]
+        return min(starts) if starts else None
 
     @staticmethod
     def _char_in_spans(char_pos: int, spans: Sequence[Tuple[int, int]]) -> bool:
@@ -426,6 +489,29 @@ class PrefixNextTokenDataset(Dataset):
             for index in range(budget)
         ]
 
+    def _non_code_positions(
+        self,
+        ids: List[int],
+        offsets: Sequence[Tuple[int, int]],
+        min_target_pos: int,
+        code_spans: Sequence[Tuple[int, int]],
+        budget: int,
+        text: str,
+    ) -> List[int]:
+        candidates = [
+            index
+            for index in range(min_target_pos, len(ids))
+            if self._is_valid_non_code_target(index, ids, offsets, min_target_pos, code_spans)
+            and text[offsets[index][0] : offsets[index][1]].strip()
+        ]
+        if not candidates or budget <= 0:
+            return []
+        if len(candidates) <= budget:
+            return candidates
+        digest = hashlib.blake2b(text.encode("utf-8", errors="replace"), digest_size=8).digest()
+        rng = random.Random(int.from_bytes(digest, "little"))
+        return sorted(rng.sample(candidates, budget))
+
     def _first_code_target(
         self,
         ids: List[int],
@@ -473,12 +559,31 @@ class PrefixNextTokenDataset(Dataset):
             return False
         return self._char_in_spans(start, code_spans)
 
+    def _is_valid_non_code_target(
+        self,
+        token_pos: Optional[int],
+        ids: List[int],
+        offsets: Sequence[Tuple[int, int]],
+        min_target_pos: int,
+        code_spans: Sequence[Tuple[int, int]],
+    ) -> bool:
+        if not self._is_valid_target(token_pos, ids, min_target_pos):
+            return False
+        assert token_pos is not None
+        if token_pos >= len(offsets):
+            return False
+        start, end = offsets[token_pos]
+        if start == end:
+            return False
+        return not self._char_in_spans(start, code_spans)
+
 
 @dataclass
 class PrefixBatch:
     input_ids: torch.LongTensor
     attention_mask: torch.LongTensor
     labels: torch.LongTensor
+    code_mask: torch.BoolTensor
     state_prefix_texts: List[str]
 
 
@@ -491,6 +596,7 @@ class PrefixCollator:
     def __call__(self, examples: List[Dict[str, Any]]) -> PrefixBatch:
         sequences = [example["prefix_ids"] for example in examples]
         labels = torch.tensor([example["label"] for example in examples], dtype=torch.long)
+        code_mask = torch.tensor([bool(example["is_code"]) for example in examples], dtype=torch.bool)
         max_len = max(len(sequence) for sequence in sequences)
         pad_id = self.tokenizer.pad_token_id
         input_ids = torch.full((len(sequences), max_len), pad_id, dtype=torch.long)
@@ -503,6 +609,7 @@ class PrefixCollator:
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
+            code_mask=code_mask,
             state_prefix_texts=[example["state_prefix"] for example in examples],
         )
 
@@ -585,6 +692,7 @@ def build_ast_extractor(config: SCEMConfig, args) -> CudaASTGraphExtractor:
         node_flag_dim=config.ast_node_flag_dim,
         node_position_dim=config.ast_node_position_dim,
         cache_dir=cache_dir,
+        allow_raw_code_fallback=getattr(args, "allow_raw_code_state_fallback", True),
     )
 
 
@@ -787,6 +895,15 @@ def corrupted_state_batches(state_batch: CudaASTGraphBatch, mode: str) -> List[C
     raise ValueError(f"Unsupported state contrastive mode: {mode}")
 
 
+def masked_mean(values: torch.Tensor, mask: torch.BoolTensor) -> torch.Tensor:
+    if values.numel() == 0:
+        return values.sum()
+    mask = mask.to(device=values.device)
+    if not bool(mask.any()):
+        return values.sum() * 0.0
+    return values[mask].mean()
+
+
 def compute_state_conditioned_loss(
     scem,
     last_hidden: torch.Tensor,
@@ -794,29 +911,59 @@ def compute_state_conditioned_loss(
     labels: torch.LongTensor,
     state_batch: CudaASTGraphBatch,
     args,
+    code_mask: Optional[torch.BoolTensor] = None,
 ) -> torch.Tensor:
     scem_bias = scem(last_hidden, state_batch).bias.to(dtype=last_logits.dtype)
     adjusted_logits = last_logits + args.alpha * scem_bias
-    true_ce = F.cross_entropy(adjusted_logits, labels)
+    true_ce_each = F.cross_entropy(adjusted_logits, labels, reduction="none")
+    if code_mask is None:
+        code_mask = torch.ones_like(labels, dtype=torch.bool)
+    else:
+        code_mask = code_mask.to(device=labels.device, dtype=torch.bool)
+    non_code_mask = ~code_mask
+
+    code_loss = masked_mean(true_ce_each, code_mask)
+    non_code_loss = masked_mean(true_ce_each, non_code_mask)
+    if bool(non_code_mask.any()):
+        kl_weight = getattr(args, "non_code_kl_weight", 0.0)
+        if kl_weight > 0.0:
+            base_probs = F.softmax(last_logits.detach().float(), dim=-1)
+            adjusted_log_probs = F.log_softmax(adjusted_logits.float(), dim=-1)
+            kl_each = F.kl_div(adjusted_log_probs, base_probs, reduction="none").sum(dim=-1)
+            non_code_loss = non_code_loss + kl_weight * masked_mean(kl_each, non_code_mask)
+        bias_l2_weight = getattr(args, "non_code_bias_l2_weight", 0.0)
+        if bias_l2_weight > 0.0:
+            bias_l2_each = scem_bias.float().pow(2).mean(dim=-1)
+            non_code_loss = non_code_loss + bias_l2_weight * masked_mean(bias_l2_each, non_code_mask)
+
+    loss = masked_mean(true_ce_each, code_mask | non_code_mask) * 0.0
+    if bool(code_mask.any()):
+        loss = loss + getattr(args, "code_loss_weight", 1.0) * code_loss
+    if bool(non_code_mask.any()):
+        loss = loss + getattr(args, "non_code_loss_weight", 1.0) * non_code_loss
+
     if args.state_contrastive_weight <= 0.0 or args.state_contrastive_mode == "none":
-        return true_ce
+        return loss
 
     margins = []
-    for corrupted_state in corrupted_state_batches(state_batch, args.state_contrastive_mode):
-        corrupted_bias = scem(last_hidden, corrupted_state).bias.to(dtype=last_logits.dtype)
-        corrupted_logits = last_logits + args.alpha * corrupted_bias
-        corrupted_ce = F.cross_entropy(corrupted_logits, labels)
-        margins.append(F.relu(args.state_contrastive_margin + true_ce - corrupted_ce))
+    if bool(code_mask.any()):
+        for corrupted_state in corrupted_state_batches(state_batch, args.state_contrastive_mode):
+            corrupted_bias = scem(last_hidden, corrupted_state).bias.to(dtype=last_logits.dtype)
+            corrupted_logits = last_logits + args.alpha * corrupted_bias
+            corrupted_ce_each = F.cross_entropy(corrupted_logits, labels, reduction="none")
+            margin_each = F.relu(args.state_contrastive_margin + true_ce_each - corrupted_ce_each)
+            margins.append(masked_mean(margin_each, code_mask))
     if not margins:
-        return true_ce
+        return loss
     contrastive_loss = torch.stack(margins).mean()
-    return true_ce + args.state_contrastive_weight * contrastive_loss
+    return loss + args.state_contrastive_weight * contrastive_loss
 
 
 def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaASTGraphExtractor, args, accelerator: Accelerator):
     input_ids = batch.input_ids.to(accelerator.device)
     attention_mask = batch.attention_mask.to(accelerator.device)
     labels = batch.labels.to(accelerator.device)
+    code_mask = batch.code_mask.to(accelerator.device)
     state_batch = extractor.extract_batch(batch.state_prefix_texts, device=accelerator.device)
 
     if args.use_lora:
@@ -836,7 +983,7 @@ def compute_scem_loss(model, scem, batch: PrefixBatch, extractor: CudaASTGraphEx
             )
     last_hidden = outputs.hidden_states[-1][:, -1, :]
     last_logits = outputs.logits[:, -1, :]
-    return compute_state_conditioned_loss(scem, last_hidden, last_logits, labels, state_batch, args)
+    return compute_state_conditioned_loss(scem, last_hidden, last_logits, labels, state_batch, args, code_mask)
 
 
 @torch.no_grad()
@@ -910,6 +1057,7 @@ def main():
         min_prefix_length=args.min_prefix_length,
         region_points_per_example=args.region_points_per_example,
         random_points_per_example=args.random_points_per_example,
+        non_code_points_per_example=args.non_code_points_per_example,
         skip_overlength=args.skip_overlength,
         max_training_points=args.max_training_points,
         records=train_records,
@@ -931,6 +1079,7 @@ def main():
             min_prefix_length=args.min_prefix_length,
             region_points_per_example=args.region_points_per_example,
             random_points_per_example=args.random_points_per_example,
+            non_code_points_per_example=args.non_code_points_per_example,
             skip_overlength=args.skip_overlength,
             max_training_points=None,
             records=val_records,

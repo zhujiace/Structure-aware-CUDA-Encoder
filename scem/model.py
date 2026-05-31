@@ -169,6 +169,14 @@ class CudaASTGraphEncoder(nn.Module):
             need_weights=False,
         )
         frontier_memory, frontier_mask = self._frontier_memory(hidden, graph)
+        global_memory = global_memory * getattr(self.config, "global_memory_scale", 1.0)
+        frontier_scales = hidden.new_tensor(
+            [
+                getattr(self.config, "cursor_memory_scale", 1.0),
+                getattr(self.config, "ancestor_memory_scale", 1.0),
+            ]
+        )
+        frontier_memory = frontier_memory * frontier_scales.view(1, -1, 1)
         memory = torch.cat([global_memory, frontier_memory], dim=1)
         memory = self.memory_projection(memory)
         if bool((~frontier_mask).any()):
@@ -262,6 +270,7 @@ class SCEModule(nn.Module):
         hidden_state = hidden_state.to(dtype=self.hidden_norm.weight.dtype)
         state = state.to(hidden_state.device)
         active_state = state.node_mask.any(dim=1)
+        allow_inactive_bias = getattr(self.config, "allow_inactive_bias", False)
         memory = self.state_encoder(state)
         query = self.query_projection(self.hidden_norm(hidden_state)).view(
             hidden_state.shape[0],
@@ -270,7 +279,7 @@ class SCEModule(nn.Module):
         )
         query = query + self.query_slot_embedding.unsqueeze(0).to(dtype=query.dtype, device=query.device)
         key_value = self.memory_projection(memory)
-        if bool((~active_state).any()):
+        if bool((~active_state).any()) and not allow_inactive_bias:
             key_value = key_value.masked_fill((~active_state).view(-1, 1, 1), 0.0)
         context_tokens, attention_weights = self.cross_attention(
             query=query,
@@ -280,11 +289,11 @@ class SCEModule(nn.Module):
             average_attn_weights=False,
         )
         context = self.context_projection(context_tokens.reshape(context_tokens.shape[0], -1))
-        if bool((~active_state).any()):
+        if bool((~active_state).any()) and not allow_inactive_bias:
             active_scale = active_state.to(dtype=context.dtype).view(-1, 1)
             context = context * active_scale
         bias, fused = self.bias_head(context)
-        if bool((~active_state).any()):
+        if bool((~active_state).any()) and not allow_inactive_bias:
             active_scale = active_state.to(dtype=bias.dtype).view(-1, 1)
             bias = bias * active_scale
             fused = fused * active_scale.to(dtype=fused.dtype)

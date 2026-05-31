@@ -24,12 +24,16 @@ class SCEMConfig:
     ast_node_position_dim: int = 5
     ast_dropout: float = 0.0
     memory_dim: int = 256
+    global_memory_scale: float = 0.35
+    cursor_memory_scale: float = 1.5
+    ancestor_memory_scale: float = 1.25
     context_dim: int = 256
     num_attention_heads: int = 4
     num_scem_queries: int = 4
     dropout: float = 0.0
     bias_rank: Optional[int] = 256
     max_bias: Optional[float] = 10.0
+    allow_inactive_bias: bool = True
 
     @classmethod
     def from_lm_config(cls, lm_config, **kwargs) -> "SCEMConfig":

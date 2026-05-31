@@ -39,8 +39,8 @@ def main():
     )
     batch = extractor.extract_batch(
         [
-            '__global__ void add(float* x, float* y, float* out, int n) { int idx = blockIdx.x * blockDim.x + threadIdx.x; if (idx < n) { out[idx] =',
-            "__global__ void reduce(float* x, float* out) { extern __shared__ float smem[]; smem[threadIdx.x] = x[threadIdx.x]; __syncthreads();",
+            '```cpp\n__global__ void add(float* x, float* y, float* out, int n) { int idx = blockIdx.x * blockDim.x + threadIdx.x; if (idx < n) { out[idx] =',
+            "```cpp\n__global__ void reduce(float* x, float* out) { extern __shared__ float smem[]; smem[threadIdx.x] = x[threadIdx.x]; __syncthreads();",
         ]
     )
     hidden = torch.randn(batch.batch_size, config.lm_hidden_size)

@@ -62,14 +62,14 @@ G_t = tree_sitter_cuda(prefix_t)
 H_t = EdgeAwareGraphTransformer(G_t)
 M_global = LearnedQueryPool(H_t)
 M_frontier = Pool(cursor_node(H_t), cursor_ancestors(H_t))
-M_t = concat(M_global, M_frontier)
+M_t = concat(0.35 * M_global, 1.5 * M_cursor, 1.25 * M_ancestors)
 c_t = CrossAttention(h_t, M_t)
 u_t = tanh(W_c LN(c_t))
 b_t = W_b u_t
 z_final = z_lm + b_t
 ```
 
-The AST graph encoder is part of SCEM and is trained end-to-end with the context-only bias head. The final bias head does not receive a direct hidden-state input; the hidden state only queries AST memory through cross-attention. The returned memory has `ast_memory_slots + 2` slots: learned global AST slots plus cursor-node and cursor-ancestor frontier slots. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
+The AST graph encoder is part of SCEM and is trained end-to-end with the context-only bias head. The final bias head does not receive a direct hidden-state input; the hidden state only queries AST memory through cross-attention. The returned memory has `ast_memory_slots + 2` slots: learned global AST slots plus cursor-node and cursor-ancestor frontier slots. The frontier slots are intentionally up-weighted and the global slots are down-weighted before projection so the current cursor state is not drowned out by full-AST summary tokens. The code keeps an optional `--alpha` scale for diagnostic experiments, but its default is `1.0` and standard training/evaluation commands do not need to set it.
 
 ## SCEM Config Parameters
 
@@ -99,10 +99,14 @@ AST graph encoder dimensions:
 SCEM fusion dimensions:
 
 - `memory_dim`: dimension of AST memory slots.
+- `global_memory_scale`: multiplier applied to learned global AST memory slots before projection.
+- `cursor_memory_scale`: multiplier applied to the cursor-node memory slot before projection.
+- `ancestor_memory_scale`: multiplier applied to the cursor-ancestor memory slot before projection.
 - `context_dim`: cross-attention query/key/value working dimension.
 - `num_attention_heads`: number of hidden-to-AST-memory cross-attention heads.
 - `num_scem_queries`: number of LM-hidden query tokens used to read AST memory.
 - `dropout`: dropout inside SCEM.
+- `allow_inactive_bias`: allow blank/inactive states to learn a conservative non-code bias instead of being hard-masked to zero.
 
 Bias head parameters:
 
@@ -179,9 +183,10 @@ field:declarator
 The model uses these edge types directly through edge-aware graph attention. No hand-written CUDA metric vector is used in the current SCEM state path.
 
 For prefixes that have not entered a CUDA code block or CUDA construct yet,
-the extractor returns an inactive AST state instead of parsing natural language
-as code. SCEM masks inactive states to zero bias, so pure-text stages are left
-to the backbone while code-generation stages can use CUDA structure.
+the extractor returns a blank AST state instead of parsing natural language as
+code. New SCEM configs allow that blank state to learn a conservative non-code
+bias, but training regularizes it with KL/L2 terms so pure-text stages stay
+close to the backbone while code-generation stages can use CUDA structure.
 
 The graph batch also marks the generation frontier: nodes near the current
 cursor, cursor ancestors, source length, and cursor distance are exposed as
@@ -499,7 +504,7 @@ __syncthreads
 ;, }
 ```
 
-`scripts/train.py` now expands only targets inside the generated CUDA/C++ code region. It uses region anchors, structure tokens such as brackets and statement punctuation, and deterministic evenly spaced code targets; it no longer samples random non-code assistant tokens. For prompt/completion, messages, and instruction/output records, SCEM state extraction uses only the assistant/completion prefix, not the user prompt.
+`scripts/train.py` now expands mostly targets inside the generated CUDA/C++ code region. It uses region anchors, structure tokens such as brackets and statement punctuation, deterministic evenly spaced code targets, and a small number of assistant non-code points for no-damage training. For prompt/completion, messages, and instruction/output records, SCEM state extraction uses only the assistant/completion prefix, not the user prompt.
 
 ### Two-stage SCEM Training
 
@@ -691,7 +696,8 @@ Data and sequence:
 - `--train-run-name`: optional run subdirectory name under `--train-output-dir/<model-name>`.
 - `--min-prefix-length`: minimum prefix length before a target token can be sampled.
 - `--region-points-per-example`: max region-aware points per raw sample.
-- `--random-points-per-example`: compatibility name for deterministic, evenly spaced code-block targets per raw sample. `scripts/train.py` no longer samples random non-code targets.
+- `--random-points-per-example`: compatibility name for deterministic, evenly spaced code-block targets per raw sample.
+- `--non-code-points-per-example`: deterministic random assistant non-code targets per raw sample. These keep SCEM from damaging normal generation outside the current CUDA code state.
 
 Optimization:
 
@@ -711,12 +717,20 @@ SCEM:
 - `--state-contrastive-weight`: weight for the true-state vs corrupted-state margin loss. Set `0` to disable.
 - `--state-contrastive-margin`: required CE margin between true and corrupted state.
 - `--state-contrastive-mode`: corrupted-state source: `zero_all`, `shuffle`, `both`, or `none`.
+- `--non-code-loss-weight`: weight for non-code CE terms.
+- `--non-code-kl-weight`: KL weight that keeps non-code SCEM-adjusted logits close to base LM logits.
+- `--non-code-bias-l2-weight`: L2 penalty on non-code vocab bias magnitude.
+- `--allow-raw-code-state-fallback` / `--no-allow-raw-code-state-fallback`: allow line-start raw CUDA code to activate AST extraction when no markdown code fence is open.
 
-The default SCEM training objective is now state-sensitive:
+The default SCEM training objective is state-sensitive and includes conservative non-code points:
 
 ```text
-loss = CE(z_lm + b(true_state), y)
-     + lambda * max(0, margin + CE_true - CE_corrupted)
+loss_code = CE(z_lm + b(true_state), y)
+          + lambda * max(0, margin + CE_true - CE_corrupted)
+
+loss_noncode = CE(z_lm + b(blank_state), y)
+             + beta * KL(p_lm || p_scem)
+             + gamma * mean(b(blank_state)^2)
 ```
 
 `zero_all` is the default corrupted state because common training commands use batch size 1, where in-batch shuffling would otherwise be ineffective.

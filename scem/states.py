@@ -267,10 +267,16 @@ class CudaASTGraphBatch:
 class IncrementalTreeSitterCudaAST:
     """Incrementally parse generated CUDA code and expose the full AST graph."""
 
-    def __init__(self, include_text: bool = True, text_limit: int = 160):
+    def __init__(
+        self,
+        include_text: bool = True,
+        text_limit: int = 160,
+        allow_raw_code_fallback: bool = True,
+    ):
         self.parser, self.provider = self._make_parser()
         self.include_text = include_text
         self.text_limit = text_limit
+        self.allow_raw_code_fallback = allow_raw_code_fallback
         self._source = ""
         self._tree = None
 
@@ -368,17 +374,32 @@ class IncrementalTreeSitterCudaAST:
             edge_type_counts={key: edge_type_counts[key] for key in sorted(edge_type_counts)},
         )
 
+    def _focus_code(self, text: str) -> str:
+        return self._focus_code_text(text, allow_raw_code_fallback=self.allow_raw_code_fallback)
+
     @staticmethod
-    def _focus_code(text: str) -> str:
+    def _focus_code_text(text: str, *, allow_raw_code_fallback: bool = True) -> str:
         if GENERATED_PREFIX_MARKER in text:
             text = text.rsplit(GENERATED_PREFIX_MARKER, 1)[1]
         fences = list(re.finditer(r"```[^\n`]*\n?", text))
         if fences:
             if len(fences) % 2 == 1:
                 return text[fences[-1].end() :]
-            return text[fences[-2].end() : fences[-1].start()]
-        markers = [text.find(marker) for marker in ("__global__", "__device__", "__host__", "#include") if marker in text]
-        return text[min(markers) :] if markers else ""
+            return ""
+        if not allow_raw_code_fallback:
+            return ""
+        code_start = IncrementalTreeSitterCudaAST._raw_code_start(text)
+        return text[code_start:] if code_start is not None else ""
+
+    @staticmethod
+    def _raw_code_start(text: str) -> Optional[int]:
+        patterns = (
+            r"(?m)^\s*#\s*include\b",
+            r"(?m)^\s*(?:extern\s+\"C\"\s+)?__(?:global__|device__|host__)\b",
+            r"(?m)^\s*template\s*<[^>\n]+>\s*(?:\n\s*)?(?:extern\s+\"C\"\s+)?__(?:global__|device__|host__)\b",
+        )
+        starts = [match.start() for pattern in patterns for match in re.finditer(pattern, text)]
+        return min(starts) if starts else None
 
     @staticmethod
     def _walk_nodes(root: Any) -> Iterable[Any]:
@@ -483,6 +504,7 @@ class CudaASTGraphExtractor:
         node_position_dim: int = 5,
         text_limit: int = 160,
         cache_dir: str | os.PathLike[str] | None = None,
+        allow_raw_code_fallback: bool = True,
     ):
         self.max_nodes = max_nodes
         self.max_edges = max_edges
@@ -494,10 +516,15 @@ class CudaASTGraphExtractor:
         self.node_flag_dim = node_flag_dim
         self.node_position_dim = node_position_dim
         self.text_limit = text_limit
+        self.allow_raw_code_fallback = allow_raw_code_fallback
         self.cache_dir = Path(cache_dir) if cache_dir else None
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._parser = IncrementalTreeSitterCudaAST(include_text=True, text_limit=text_limit)
+        self._parser = IncrementalTreeSitterCudaAST(
+            include_text=True,
+            text_limit=text_limit,
+            allow_raw_code_fallback=allow_raw_code_fallback,
+        )
         self._incremental_parsers: List[IncrementalTreeSitterCudaAST] = []
 
     def reset(self) -> None:
@@ -514,7 +541,11 @@ class CudaASTGraphExtractor:
         if incremental:
             while len(self._incremental_parsers) < len(prefixes):
                 self._incremental_parsers.append(
-                    IncrementalTreeSitterCudaAST(include_text=True, text_limit=self.text_limit)
+                    IncrementalTreeSitterCudaAST(
+                        include_text=True,
+                        text_limit=self.text_limit,
+                        allow_raw_code_fallback=self.allow_raw_code_fallback,
+                    )
                 )
             snapshots = [
                 self._incremental_parsers[index].parse(prefix, incremental=True)
@@ -571,7 +602,8 @@ class CudaASTGraphExtractor:
         config = "|".join(
             str(value)
             for value in (
-                "ast_graph_v3",
+                "ast_graph_v4",
+                self.allow_raw_code_fallback,
                 self.max_nodes,
                 self.max_edges,
                 self.node_type_vocab_size,

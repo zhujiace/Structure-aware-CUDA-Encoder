@@ -199,9 +199,9 @@ Important behavior:
 
 - Supports `text`, `prompt/completion`, `messages`, and `instruction/input/output` formats.
 - Supports `.json` and `.jsonl`.
-- Uses code-only training points from region anchors, structure-heavy tokens, and deterministic evenly spaced code-block positions. `scripts/train.py` no longer samples random non-code assistant tokens; `--random-points-per-example` is kept as a compatibility name for deterministic code-block points.
+- Uses code-heavy training points from region anchors, structure-heavy tokens, deterministic evenly spaced code-block positions, plus a small number of assistant non-code points. `--random-points-per-example` is kept as a compatibility name for deterministic code-block points; `--non-code-points-per-example` controls the non-code samples.
 - CUDA state extraction is AST-graph based. Training state uses the assistant/completion prefix, and generation state strips the fixed prompt/chat input before parsing with `tree_sitter_cuda`. Do not reintroduce global `task_family` / `tensor_rank` fields or the old hand-written CUDA metric vector unless the user explicitly asks for that design.
-- AST graph extraction emits parser-native node/edge IDs with hash embeddings, padded by `SCEMConfig.ast_max_nodes` and `SCEMConfig.ast_max_edges`. The SCEM model encodes these graphs with an edge-aware Graph Transformer, learned global AST memory queries, and two explicit frontier memory slots pooled from the cursor node and cursor ancestors.
+- AST graph extraction emits parser-native node/edge IDs with hash embeddings, padded by `SCEMConfig.ast_max_nodes` and `SCEMConfig.ast_max_edges`. The SCEM model encodes these graphs with an edge-aware Graph Transformer, learned global AST memory queries, and two explicit frontier memory slots pooled from the cursor node and cursor ancestors. Global memory is down-weighted before projection, while cursor and ancestor memory are up-weighted.
 - Model-internal SCEM defaults are set in `scem/config.py` for the 4B path (`bias_rank=256`, multi-query cross attention, AST node cap 768 / edge cap 3072). Do not re-add these as `train.py` CLI flags; edit `SCEMConfig` directly when changing architecture.
 - `--ast-cache-dir` defaults to `train_outputs/ast_cache`; pass an empty string to disable AST tensor caching.
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
@@ -612,16 +612,15 @@ Training and evaluation default `--alpha` to `1.0`, and normal commands should l
 
 The default SCEM state path now parses the generated CUDA prefix with `tree_sitter_cuda`, converts the full AST into a typed graph, encodes it with an edge-aware Graph Transformer, and pools learned global AST memory plus explicit cursor/frontier memory tokens for multi-query hidden-state cross attention. The context-only bias head reads the cross-attended AST context rather than directly reading hidden state. The old 7-slot heuristic state encoder and `--bias-arch concat` path are no longer part of the main code path.
 
-Training defaults include a true-state vs corrupted-state margin term (`--state-contrastive-weight`, `--state-contrastive-margin`, `--state-contrastive-mode`) so SCEM is explicitly pressured to make the correct CUDA state outperform a corrupted state. Use `--state-contrastive-weight 0` only for ablation/debug runs.
+Training defaults include a true-state vs corrupted-state margin term (`--state-contrastive-weight`, `--state-contrastive-margin`, `--state-contrastive-mode`) so SCEM is explicitly pressured to make the correct CUDA state outperform a corrupted state. Training also includes non-code assistant points with CE plus KL/L2 no-damage regularization so blank states do not destabilize normal generation. Use `--state-contrastive-weight 0` only for ablation/debug runs.
 
 ### Region-aware multi-point SFT is intentional
 
-Training no longer samples random assistant-output points.  
-`scripts/train.py` expands each CUDA example into code-only next-token points based on region anchors, structure-heavy code tokens, and deterministic evenly spaced code positions.
+`scripts/train.py` expands each CUDA example into mostly code next-token points based on region anchors, structure-heavy code tokens, and deterministic evenly spaced code positions. It also samples a small number of non-code assistant points to train conservative blank-state behavior.
 
 ### AST state extractor uses generated prefix
 
-The current SCEM state no longer includes manually supplied task-family or tensor-rank fields, heuristic static flags, or normalized scalar CUDA metrics. Dynamic code state is derived from the active generated CUDA code block/prefix. Pure text before CUDA code starts is represented as an inactive AST state, and SCEM masks inactive states to zero bias so it does not affect non-code phases. Tree-sitter error/missing nodes plus cursor/frontier features are preserved because incomplete prefixes are meaningful generation states.
+The current SCEM state no longer includes manually supplied task-family or tensor-rank fields, heuristic static flags, or normalized scalar CUDA metrics. Dynamic code state is derived from an open generated code fence or line-start raw CUDA code after the prompt/generation separator; arbitrary prose containing `__global__` no longer activates AST parsing. Pure text before CUDA code starts is represented as a blank AST state. New SCEM configs allow blank states to learn a conservative non-code bias, constrained by non-code CE/KL/L2 training terms. Tree-sitter error/missing nodes plus cursor/frontier features are preserved because incomplete prefixes are meaningful generation states.
 
 Current SCEM checkpoints must be retrained after this AST graph and context-only bias-head architecture change. Checkpoints trained with heuristic state tensors or the old concat/state-gated-delta/state-gated bias modules are incompatible.
 
