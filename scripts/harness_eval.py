@@ -77,7 +77,11 @@ def parse_args():
     parser.add_argument("--model-path", default="./models/Qwen3.5-0.8B")
     parser.add_argument("--scem-checkpoint", default=None, help="Optional path to scem.pt for decoding-time SCEM bias.")
     parser.add_argument("--lora-checkpoint", default=None, help="Optional path to a PEFT/LoRA adapter directory.")
-    parser.add_argument("--output-dir", default=None, help="Output directory. If omitted, create a unique dated eval_outputs/ harness directory.")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory. If omitted, create a unique harness directory under eval_outputs/<model>/<YYMMDD>/.",
+    )
     parser.add_argument("--run-name", default=None, help="Optional label included in the auto-generated output directory name.")
     parser.add_argument("--level", choices=["level1_prompt", "level2_prompt", "level3_prompt"], default="level1_prompt")
     parser.add_argument("--gpu-model", default="NVIDIA GeForce RTX 4090")
@@ -145,8 +149,8 @@ def build_auto_output_dir(args) -> Path:
         if run_label not in mode_parts:
             mode_parts.append(run_label)
     date_label = datetime.now().strftime("%y%m%d")
-    name = "_".join([level_label, *mode_parts, date_label])
-    return uniquify_output_dir(Path("eval_outputs") / model_label / name)
+    name = "_".join([level_label, *mode_parts])
+    return uniquify_output_dir(Path("eval_outputs") / model_label / date_label / name)
 
 
 def find_matching_brace(text: str, open_index: int) -> int:

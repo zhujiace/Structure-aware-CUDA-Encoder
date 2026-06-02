@@ -158,8 +158,8 @@ All user-facing entrypoints live in `scripts/`.
 Use short, experiment-focused names for future checkpoint, train-output, and eval run directories.
 
 - Do not repeat the backbone name in run names by default.
-- `eval_outputs/<model-name>/...` already groups evaluation outputs by backbone.
-- `train_outputs/<model-name>/...` also groups training logs by backbone.
+- `eval_outputs/<model-name>/<YYMMDD>/...` groups evaluation outputs by backbone and date.
+- `train_outputs/<model-name>/<YYMMDD>/...` groups training logs by backbone and date.
 - Training runs record the full model path in `training_args.json`, so run names can focus on method, data, and key settings.
 - Prefer names like `astgraph_2stage_harness`, `astgraph_cudapollute_ep3`, or `lora_scem_harness`.
 - Avoid long names like `scem_qwen35_4b_scem_astgraph_train_cudabench_2gpu_ep3` unless the user explicitly asks for backbone-identifying names or multiple backbones are intentionally mixed in one parent directory.
@@ -207,7 +207,7 @@ Important behavior:
 - Supports `--skip-overlength`, `--max-raw-examples`, and `--max-training-points`.
 - Supports `--val-ratio` with `--var-ratio` as a compatibility alias; validation is split by raw records and used for validation loss tracking.
 - Training now saves regular `step-*` checkpoints, `final/`, and `best/` when validation is enabled.
-- Training writes run logs under `train_outputs/<model-name>/<run-name>/` by default: `metrics.jsonl`, `metrics.csv`, `summary.json`, `training_args.json`, and separate plots under `figs/` when matplotlib is available.
+- Training writes run logs under `train_outputs/<model-name>/<YYMMDD>/<run-name>/` by default: `metrics.jsonl`, `metrics.csv`, `summary.json`, `training_args.json`, and separate plots under `figs/` when matplotlib is available.
 - For the current `data/train.json`, `--max-length 4096` covers about 99.6% of records; `--max-length 3072 --skip-overlength` covers about 94.6% without training on truncated records.
 - Larger checkpoint output directories should use `/data/projects/scem/checkpoints/` to avoid filling the user home directory.
 - 4B and 9B LoRA training has been smoke-tested with Accelerate/DDP; current DDP duplicates the full backbone on each GPU, so it improves throughput but does not reduce per-GPU model memory.
@@ -240,7 +240,7 @@ Important behavior:
 
 - Default mode is backbone-only baseline if `--scem-checkpoint` is omitted.
 - Uses CUDABench prompt format from the submodule.
-- If `--output-dir` is omitted, creates a unique directory under `eval_outputs/<model-name>/` using level, mode flags, optional `--run-name`, and short date such as `260511`; same-day duplicates get `_02`, `_03`, ... suffixes.
+- If `--output-dir` is omitted, creates a unique directory under `eval_outputs/<model-name>/<YYMMDD>/` using level, mode flags, and optional `--run-name`; same-day duplicates get `_02`, `_03`, ... suffixes.
 - Use `--output-dir` only when intentionally writing to a fixed directory.
 - Writes:
   - `generated_results.jsonl`
@@ -268,7 +268,7 @@ Important behavior:
 
 - Does not replace `scripts/eval.py`; standalone and harness metrics should be interpreted separately.
 - Intended to reduce noise from missing `main`/I/O boilerplate and better isolate CUDA kernel generation ability.
-- If `--output-dir` is omitted, creates a unique dated directory under `eval_outputs/<model-name>/`; same-day duplicates get `_02`, `_03`, ... suffixes.
+- If `--output-dir` is omitted, creates a unique directory under `eval_outputs/<model-name>/<YYMMDD>/`; same-day duplicates get `_02`, `_03`, ... suffixes.
 - Supports `--generate-only` to write `generated_results.jsonl` without running compile/functionality checks.
 - If launched with `accelerate launch --num_processes N`, generation is automatically sharded across ranks and merged by rank 0 into the same `generated_results.jsonl` format as single-process generation. Non-main ranks do not run the detection phase.
 
@@ -553,8 +553,8 @@ Do not treat `eval_outputs/Qwen3.5-4B_level1_baseline_stride5_limit1_auto_dir_ch
 
 Recent code/output changes to remember:
 
-- `scripts/eval.py` and `scripts/harness_eval.py` now auto-create output directories under `eval_outputs/<model-name>/`.
-- Auto directory names use a short date like `260511`, not a full timestamp. Same-day duplicates get `_02`, `_03`, ... suffixes.
+- `scripts/eval.py` and `scripts/harness_eval.py` now auto-create output directories under `eval_outputs/<model-name>/<YYMMDD>/`.
+- Auto output paths use a short date folder like `260511`, not a full timestamp in the run directory name. Same-day duplicate run directories get `_02`, `_03`, ... suffixes.
 - `scripts/utils.py` has a configurable first-code-block stopping criterion. Harness eval passes required substrings such as `__global__` and the kernel name, while standalone `eval.py` keeps the default first-complete-code-block behavior.
 - `scripts/harness_eval.py` prompts for exactly one fenced cpp block containing the replacement `__global__` kernel and any needed helpers in the same block. It should not ask the model to generate `main`.
 
@@ -575,7 +575,7 @@ CUDA_VISIBLE_DEVICES=0 \
 Expected output directory shape:
 
 ```text
-eval_outputs/Qwen3.5-4B/level1_harness_stride5_baseline_260511/
+eval_outputs/Qwen3.5-4B/260511/level1_harness_stride5_baseline/
 ```
 
 This means the next likely tasks are:

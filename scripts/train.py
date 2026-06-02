@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--train-run-name",
         default=None,
-        help="Optional name for the run subdirectory under --train-output-dir/<model-name>.",
+        help="Optional name for the run subdirectory under --train-output-dir/<model-name>/<YYMMDD>.",
     )
     parser.add_argument("--max-length", type=int, default=2048)
     parser.add_argument("--min-prefix-length", type=int, default=16)
@@ -489,6 +489,16 @@ def slugify(value: str) -> str:
     return slug or "run"
 
 
+def uniquify_run_dir(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(2, 1000):
+        candidate = path.with_name(f"{path.name}_{index:02d}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Cannot find a free training log directory based on {path}")
+
+
 class TrainingRunLogger:
     fieldnames = [
         "event",
@@ -503,9 +513,11 @@ class TrainingRunLogger:
 
     def __init__(self, args, train_points: int, val_points: int, total_steps: int):
         model_label = slugify(Path(args.model_path).name)
-        base = Path(args.train_output_dir) / model_label
-        run_name = args.train_run_name or f"{slugify(Path(args.output_dir).name)}_{datetime.now().strftime('%y%m%d_%H%M%S')}"
-        self.path = base / run_name
+        date_label = datetime.now().strftime("%y%m%d")
+        base = Path(args.train_output_dir) / model_label / date_label
+        run_name = args.train_run_name or f"{slugify(Path(args.output_dir).name)}_{datetime.now().strftime('%H%M%S')}"
+        self.path = uniquify_run_dir(base / run_name)
+        run_name = self.path.name
         self.path.mkdir(parents=True, exist_ok=True)
         self.jsonl_path = self.path / "metrics.jsonl"
         self.csv_path = self.path / "metrics.csv"

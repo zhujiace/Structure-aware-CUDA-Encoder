@@ -38,7 +38,7 @@ def parse_args():
         default=None,
         help=(
             "Evaluation output directory. If omitted, a unique directory is created under "
-            "./eval_outputs using model, level, mode, and date."
+            "./eval_outputs/<model>/<YYMMDD>/ using model, level, and mode."
         ),
     )
     parser.add_argument("--run-name", default=None, help="Optional label included in the auto-generated output directory name.")
@@ -112,8 +112,8 @@ def build_auto_output_dir(args) -> Path:
         if run_label not in mode_parts:
             mode_parts.append(run_label)
     date_label = datetime.now().strftime("%y%m%d")
-    name = "_".join([level_label, *mode_parts, date_label])
-    return uniquify_output_dir(Path("eval_outputs") / model_label / name)
+    name = "_".join([level_label, *mode_parts])
+    return uniquify_output_dir(Path("eval_outputs") / model_label / date_label / name)
 
 
 def select_eval_tasks(tasks: List[Dict[str, Any]], stride: int, limit: int | None) -> List[Dict[str, Any]]:

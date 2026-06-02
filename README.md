@@ -377,10 +377,10 @@ summary.json              aggregate metrics
 temp_eval/                temporary compile/run directories, only kept with --keep-temp
 ```
 
-If `--output-dir` is omitted, `scripts/eval.py` creates a unique directory under `eval_outputs/<model-name>/` using the prompt level, enabled modes, task subset, optional `--run-name`, and a short date. If the same directory already exists, `_02`, `_03`, ... is appended automatically. Example:
+If `--output-dir` is omitted, `scripts/eval.py` creates a unique directory under `eval_outputs/<model-name>/<YYMMDD>/` using the prompt level, enabled modes, task subset, and optional `--run-name`. If the same directory already exists, `_02`, `_03`, ... is appended automatically. Example:
 
 ```text
-eval_outputs/Qwen3.5-4B/level1_baseline_scemprompt_stride5_firstpass_260511/
+eval_outputs/Qwen3.5-4B/260511/level1_baseline_scemprompt_stride5_firstpass/
 ```
 
 Because the parent directory already contains the backbone name, keep `--run-name` short and focused on the experiment, such as `astgraph_2stage` or `cudapollute_ep3`.
@@ -446,7 +446,7 @@ Example 4B harness baseline:
   --run-name qwen35_4b_harness_level1_stride5
 ```
 
-If `--output-dir` is omitted, it creates a unique dated directory under `eval_outputs/<model-name>/`, similar to `scripts/eval.py`.
+If `--output-dir` is omitted, it creates a unique directory under `eval_outputs/<model-name>/<YYMMDD>/`, similar to `scripts/eval.py`.
 
 Harness generation can run on 1-4 GPUs. With normal `python`, generation is single-process. With `accelerate launch --num_processes N`, tasks are automatically sharded across ranks, each rank writes `generated_results.rank<N>.jsonl`, and rank 0 merges the shards into the standard `generated_results.jsonl` format before evaluation. Add `--generate-only` to stop after generation and skip compile/functionality checks:
 
@@ -692,7 +692,7 @@ Data and sequence:
 - `--max-training-points`: keep only the first N expanded training points, intended for smoke tests.
 - `--val-ratio` / `--var-ratio`: reserve a fraction of raw records for validation loss tracking. `--var-ratio` is accepted only as a compatibility alias.
 - `--train-output-dir`: directory for training logs and loss curves, default `train_outputs`.
-- `--train-run-name`: optional run subdirectory name under `--train-output-dir/<model-name>`.
+- `--train-run-name`: optional run subdirectory name under `--train-output-dir/<model-name>/<YYMMDD>`.
 - `--min-prefix-length`: minimum prefix length before a target token can be sampled.
 - `--region-points-per-example`: max region-aware points per raw sample.
 - `--random-points-per-example`: random points per raw sample.
@@ -761,7 +761,7 @@ Validation loss is computed at `--save-steps` intervals and once at the final st
 Each training run writes lightweight logs under:
 
 ```text
-train_outputs/<model-name>/<run-name>/
+train_outputs/<model-name>/<YYMMDD>/<run-name>/
   metrics.jsonl       append-only train/validation events
   metrics.csv         same metrics in spreadsheet-friendly format
   summary.json        final_step, best_step, best_val_loss, output paths
@@ -771,13 +771,13 @@ train_outputs/<model-name>/<run-name>/
     val_loss.png      validation-loss curve, generated when matplotlib is available
 ```
 
-If `--train-run-name` is omitted, the run name is derived from `--output-dir` and a timestamp. Training logs are grouped by backbone under `<model-name>`, so prefer concise method/data names and avoid repeating the backbone name in `--train-run-name`.
+If `--train-run-name` is omitted, the run name is derived from `--output-dir` and a time suffix. Training logs are grouped by backbone and date, so prefer concise method/data names and avoid repeating the backbone name or date in `--train-run-name`.
 
 Useful inspection commands:
 
 ```bash
-tail -n 20 train_outputs/<model-name>/<run-name>/metrics.csv
-cat train_outputs/<model-name>/<run-name>/summary.json
+tail -n 20 train_outputs/<model-name>/<YYMMDD>/<run-name>/metrics.csv
+cat train_outputs/<model-name>/<YYMMDD>/<run-name>/summary.json
 ```
 
 Open `figs/train_loss.png` and `figs/val_loss.png` to inspect the training and validation loss trends separately. The plots are updated at validation events and at the final step; train-only log events append CSV/JSONL rows without redrawing images. Training loss points are logged every `--log-steps`; validation loss points are logged every `--save-steps` and at the final step. The `best_step` in `summary.json` is the checkpoint step copied to `<output-dir>/best/`.
